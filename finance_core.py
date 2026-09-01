@@ -1,0 +1,307 @@
+"""
+=====================================================================
+Personal Finance Agent - Core Engine (Supabase version)
+=====================================================================
+
+Same Agent Loop pattern as before, but transactions now live in
+Supabase (cloud PostgreSQL) instead of a local SQLite file - so any
+device (your laptop, a webhook server, eventually a phone) can read
+and write the same data.
+
+Install:
+    pip install groq python-dotenv supabase
+
+.env needs:
+    GROQ_API_KEY=gsk_...
+    SUPABASE_URL=https://xxxxx.supabase.co
+    SUPABASE_KEY=eyJhbGc...
+"""
+
+import os
+import json
+from datetime import datetime, date
+from dotenv import load_dotenv
+from groq import Groq
+from supabase import create_client
+
+load_dotenv()
+
+groq_client = Groq()
+MODEL_NAME = "openai/gpt-oss-120b"
+
+supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
+
+VALID_CATEGORIES = [
+    "food", "transport", "bills", "shopping", "entertainment",
+    "health", "transfer", "salary", "other"
+]
+
+
+# =================================================================
+# Tools - same signatures as before, different storage backend
+# =================================================================
+
+def add_transaction(amount: float, category: str, type: str,
+                     party: str = "", raw_text: str = "", txn_date: str = None) -> str:
+    if category not in VALID_CATEGORIES:
+        category = "other"
+    if type not in ("expense", "income"):
+        return f"Error: type must be 'expense' or 'income', got '{type}'"
+
+    txn_date = txn_date or date.today().isoformat()
+
+    supabase.table("transactions").insert({
+        "txn_date": txn_date,
+        "amount": amount,
+        "party": party,
+        "category": category,
+        "type": type,
+        "raw_text": raw_text,
+    }).execute()
+
+    sign = "-" if type == "expense" else "+"
+    return f"Recorded: {sign}{amount} EGP | {category} | {party or 'N/A'}"
+
+
+def query_transactions(period: str = "this_month", category: str = None) -> str:
+    now = datetime.now()
+
+    query = supabase.table("transactions").select("*")
+
+    if period == "this_month":
+        query = query.gte("txn_date", f"{now.strftime('%Y-%m')}-01")
+    elif period == "today":
+        query = query.eq("txn_date", date.today().isoformat())
+    elif period == "last_month":
+        last_month = now.month - 1 or 12
+        year = now.year if now.month > 1 else now.year - 1
+        query = query.gte("txn_date", f"{year}-{last_month:02d}-01") \
+                      .lt("txn_date", f"{now.strftime('%Y-%m')}-01")
+
+    if category:
+        query = query.eq("category", category)
+
+    rows = query.execute().data
+
+    if not rows:
+        return f"No transactions found for period '{period}'" + (f" in category '{category}'" if category else "")
+
+    # Aggregate in Python (simple and reliable for personal-scale data volume)
+    totals = {}
+    for r in rows:
+        key = (r["category"], r["type"])
+        totals.setdefault(key, {"sum": 0.0, "count": 0})
+        totals[key]["sum"] += r["amount"]
+        totals[key]["count"] += 1
+
+    lines = []
+    total_expense = 0.0
+    total_income = 0.0
+    for (cat, type_), agg in totals.items():
+        lines.append(f"- {cat} ({type_}): {agg['sum']:.2f} EGP across {agg['count']} transaction(s)")
+        if type_ == "expense":
+            total_expense += agg["sum"]
+        else:
+            total_income += agg["sum"]
+
+    summary = f"Period: {period}\n" + "\n".join(lines)
+    summary += f"\n\nTotal expenses: {total_expense:.2f} EGP | Total income: {total_income:.2f} EGP"
+    return summary
+
+
+def set_budget(category: str, monthly_limit: float) -> str:
+    if category not in VALID_CATEGORIES:
+        category = "other"
+    supabase.table("budgets").upsert({
+        "category": category, "monthly_limit": monthly_limit
+    }).execute()
+    return f"Budget set: {category} -> {monthly_limit} EGP/month"
+
+
+def check_budget_status() -> str:
+    budgets = supabase.table("budgets").select("*").execute().data
+    if not budgets:
+        return "No budgets set yet."
+
+    now = datetime.now()
+    results = []
+    for b in budgets:
+        category, limit = b["category"], b["monthly_limit"]
+        rows = supabase.table("transactions").select("amount") \
+            .gte("txn_date", f"{now.strftime('%Y-%m')}-01") \
+            .eq("category", category).eq("type", "expense").execute().data
+        spent = sum(r["amount"] for r in rows)
+        pct = (spent / limit * 100) if limit > 0 else 0
+        status = "⚠️ OVER BUDGET" if spent > limit else "✅ OK"
+        results.append(f"- {category}: {spent:.2f} / {limit:.2f} EGP ({pct:.0f}%) {status}")
+
+    return "\n".join(results)
+
+
+TOOLS_SCHEMA = [
+    {"type": "function", "function": {
+        "name": "add_transaction",
+        "description": "Records a new financial transaction (expense or income). "
+                        "Extract the amount, category, type, and party from the user's message "
+                        "(which is often a raw bank/wallet SMS notification).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "amount": {"type": "number"},
+                "category": {"type": "string", "enum": VALID_CATEGORIES},
+                "type": {"type": "string", "enum": ["expense", "income"]},
+                "party": {"type": "string"},
+                "raw_text": {"type": "string"},
+            },
+            "required": ["amount", "category", "type"]
+        }
+    }},
+    {"type": "function", "function": {
+        "name": "query_transactions",
+        "description": "Retrieves a summary of transactions for a time period, optionally filtered by category.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "period": {"type": "string", "enum": ["today", "this_month", "last_month", "all"]},
+                "category": {"type": "string", "enum": VALID_CATEGORIES},
+            },
+            "required": ["period"]
+        }
+    }},
+    {"type": "function", "function": {
+        "name": "set_budget",
+        "description": "Sets a monthly spending limit for a category.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "category": {"type": "string", "enum": VALID_CATEGORIES},
+                "monthly_limit": {"type": "number"},
+            },
+            "required": ["category", "monthly_limit"]
+        }
+    }},
+    {"type": "function", "function": {
+        "name": "check_budget_status",
+        "description": "Shows how much has been spent this month against each set budget.",
+        "parameters": {"type": "object", "properties": {}}
+    }},
+]
+
+
+def execute_tool(tool_name: str, args: dict) -> str:
+    try:
+        if tool_name == "add_transaction":
+            return add_transaction(**args)
+        elif tool_name == "query_transactions":
+            return query_transactions(period=args.get("period", "this_month"), category=args.get("category"))
+        elif tool_name == "set_budget":
+            return set_budget(args["category"], args["monthly_limit"])
+        elif tool_name == "check_budget_status":
+            return check_budget_status()
+        else:
+            return f"Error: unknown tool '{tool_name}'"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+# =================================================================
+# Agent Loop - interactive chat version (asks for clarification)
+# =================================================================
+
+CHAT_SYSTEM_PROMPT = (
+    "You are a personal finance assistant. When the user pastes a raw bank or "
+    "e-wallet SMS notification, extract the transaction details and record them "
+    "using add_transaction. "
+    "For the category: if the merchant name clearly implies one category, use it "
+    "directly. But if the merchant is a general store where the purchase could "
+    "reasonably be several categories, ask the user to clarify BEFORE recording. "
+    "When the user asks about their spending, use query_transactions. "
+    "Always confirm what you recorded in a short, clear sentence."
+)
+
+
+def run_finance_agent(user_message: str, history: list, log_callback=None, max_iterations: int = 5):
+    def log(msg):
+        if log_callback:
+            log_callback(msg)
+
+    if not history:
+        history.append({"role": "system", "content": CHAT_SYSTEM_PROMPT})
+
+    history.append({"role": "user", "content": user_message})
+
+    for _ in range(max_iterations):
+        response = groq_client.chat.completions.create(
+            model=MODEL_NAME, messages=history, tools=TOOLS_SCHEMA, max_tokens=600,
+        )
+        message = response.choices[0].message
+        history.append(message)
+
+        if message.tool_calls:
+            for tool_call in message.tool_calls:
+                args = json.loads(tool_call.function.arguments)
+                log(f"🔧 {tool_call.function.name}({args})")
+                result = execute_tool(tool_call.function.name, args)
+                log(f"   -> {result[:200]}")
+                history.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
+        else:
+            return message.content
+
+    return "Could not complete the request."
+
+
+# =================================================================
+# Webhook mode - single-shot, no back-and-forth possible (an SMS
+# forwarder just fires-and-forgets), so it must never ask a
+# question - it has to make its best guess and record something.
+# =================================================================
+
+WEBHOOK_SYSTEM_PROMPT = (
+    "You are a finance assistant processing an automated, one-way SMS forward. "
+    "You cannot ask the user anything - always make your best guess and call "
+    "add_transaction immediately with a reasonable category. If the message is "
+    "not a financial transaction at all (e.g. an OTP code, a promotional SMS), "
+    "do not call any tool - just reply 'not a transaction'."
+)
+
+
+def process_incoming_sms(raw_text: str) -> str:
+    messages = [
+        {"role": "system", "content": WEBHOOK_SYSTEM_PROMPT},
+        {"role": "user", "content": raw_text},
+    ]
+
+    for iteration in range(3):
+        print(f"  [webhook iteration {iteration + 1}]")
+
+        try:
+            response = groq_client.chat.completions.create(
+                model=MODEL_NAME, messages=messages, tools=TOOLS_SCHEMA, max_tokens=400,
+            )
+        except Exception as e:
+            print(f"  ❌ Groq API call failed: {e}")
+            return f"API error: {e}"
+
+        message = response.choices[0].message
+        messages.append(message)
+
+        print(f"  [model content]: {message.content}")
+        print(f"  [tool_calls]: {message.tool_calls}")
+
+        if message.tool_calls:
+            for tool_call in message.tool_calls:
+                try:
+                    args = json.loads(tool_call.function.arguments)
+                except json.JSONDecodeError as e:
+                    print(f"  ❌ Bad JSON from model: {tool_call.function.arguments}")
+                    result = f"Error: invalid JSON arguments ({e})"
+                else:
+                    args["raw_text"] = raw_text
+                    print(f"  [calling]: {tool_call.function.name}({args})")
+                    result = execute_tool(tool_call.function.name, args)
+                    print(f"  [result]: {result}")
+                messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
+        else:
+            return message.content
+
+    return "Could not process this message."
