@@ -1,24 +1,22 @@
 """
 =====================================================================
-Personal Finance Agent - Core Engine (Supabase version)
+Personal Finance Agent - Core Engine (multi-tenant Supabase version)
 =====================================================================
 
-Same Agent Loop pattern as before, but transactions now live in
-Supabase (cloud PostgreSQL) instead of a local SQLite file - so any
-device (your laptop, a webhook server, eventually a phone) can read
-and write the same data.
-
-Install:
-    pip install groq python-dotenv supabase
+Same Agent Loop pattern as before, but every read/write is now
+scoped to a user_id, so many people can safely share the same
+deployment without seeing each other's data.
 
 .env needs:
     GROQ_API_KEY=gsk_...
     SUPABASE_URL=https://xxxxx.supabase.co
     SUPABASE_KEY=eyJhbGc...
+    TELEGRAM_BOT_TOKEN=123456:ABC...   (added for the bot / monthly job)
 """
 
 import os
 import json
+import secrets
 from datetime import datetime, date
 from dotenv import load_dotenv
 from groq import Groq
@@ -38,10 +36,43 @@ VALID_CATEGORIES = [
 
 
 # =================================================================
-# Tools - same signatures as before, different storage backend
+# User management - links a Telegram account to a private webhook
 # =================================================================
 
-def add_transaction(amount: float, category: str, type: str,
+def get_or_create_user(telegram_chat_id: int, display_name: str = "") -> dict:
+    """Returns the user row for this Telegram chat, creating one
+    (with a fresh api_token) the first time they say /start."""
+    existing = supabase.table("users").select("*") \
+        .eq("telegram_chat_id", telegram_chat_id).execute().data
+    if existing:
+        return existing[0]
+
+    token = secrets.token_urlsafe(24)
+    row = supabase.table("users").insert({
+        "telegram_chat_id": telegram_chat_id,
+        "api_token": token,
+        "display_name": display_name,
+    }).execute().data
+    return row[0]
+
+
+def get_user_by_token(token: str) -> dict | None:
+    """Looks up which user a webhook request belongs to, based on
+    the token in their personal webhook URL."""
+    rows = supabase.table("users").select("*").eq("api_token", token).execute().data
+    return rows[0] if rows else None
+
+
+def list_all_users() -> list[dict]:
+    """Used by the monthly summary job to loop over everyone."""
+    return supabase.table("users").select("*").execute().data
+
+
+# =================================================================
+# Tools - same signatures as before, all scoped by user_id
+# =================================================================
+
+def add_transaction(user_id: str, amount: float, category: str, type: str,
                      party: str = "", raw_text: str = "", txn_date: str = None) -> str:
     if category not in VALID_CATEGORIES:
         category = "other"
@@ -51,6 +82,7 @@ def add_transaction(amount: float, category: str, type: str,
     txn_date = txn_date or date.today().isoformat()
 
     supabase.table("transactions").insert({
+        "user_id": user_id,
         "txn_date": txn_date,
         "amount": amount,
         "party": party,
@@ -63,10 +95,10 @@ def add_transaction(amount: float, category: str, type: str,
     return f"Recorded: {sign}{amount} EGP | {category} | {party or 'N/A'}"
 
 
-def query_transactions(period: str = "this_month", category: str = None) -> str:
+def query_transactions(user_id: str, period: str = "this_month", category: str = None) -> str:
     now = datetime.now()
 
-    query = supabase.table("transactions").select("*")
+    query = supabase.table("transactions").select("*").eq("user_id", user_id)
 
     if period == "this_month":
         query = query.gte("txn_date", f"{now.strftime('%Y-%m')}-01")
@@ -86,7 +118,6 @@ def query_transactions(period: str = "this_month", category: str = None) -> str:
     if not rows:
         return f"No transactions found for period '{period}'" + (f" in category '{category}'" if category else "")
 
-    # Aggregate in Python (simple and reliable for personal-scale data volume)
     totals = {}
     for r in rows:
         key = (r["category"], r["type"])
@@ -109,17 +140,17 @@ def query_transactions(period: str = "this_month", category: str = None) -> str:
     return summary
 
 
-def set_budget(category: str, monthly_limit: float) -> str:
+def set_budget(user_id: str, category: str, monthly_limit: float) -> str:
     if category not in VALID_CATEGORIES:
         category = "other"
     supabase.table("budgets").upsert({
-        "category": category, "monthly_limit": monthly_limit
-    }).execute()
+        "user_id": user_id, "category": category, "monthly_limit": monthly_limit
+    }, on_conflict="user_id,category").execute()
     return f"Budget set: {category} -> {monthly_limit} EGP/month"
 
 
-def check_budget_status() -> str:
-    budgets = supabase.table("budgets").select("*").execute().data
+def check_budget_status(user_id: str) -> str:
+    budgets = supabase.table("budgets").select("*").eq("user_id", user_id).execute().data
     if not budgets:
         return "No budgets set yet."
 
@@ -128,11 +159,12 @@ def check_budget_status() -> str:
     for b in budgets:
         category, limit = b["category"], b["monthly_limit"]
         rows = supabase.table("transactions").select("amount") \
+            .eq("user_id", user_id) \
             .gte("txn_date", f"{now.strftime('%Y-%m')}-01") \
             .eq("category", category).eq("type", "expense").execute().data
         spent = sum(r["amount"] for r in rows)
         pct = (spent / limit * 100) if limit > 0 else 0
-        status = "⚠️ OVER BUDGET" if spent > limit else "✅ OK"
+        status = "OVER BUDGET" if spent > limit else "OK"
         results.append(f"- {category}: {spent:.2f} / {limit:.2f} EGP ({pct:.0f}%) {status}")
 
     return "\n".join(results)
@@ -188,16 +220,20 @@ TOOLS_SCHEMA = [
 ]
 
 
-def execute_tool(tool_name: str, args: dict) -> str:
+def execute_tool(tool_name: str, args: dict, user_id: str) -> str:
+    """user_id is injected here, never taken from the LLM's own
+    arguments, so a message can never read or write another
+    person's data no matter what the model outputs."""
     try:
         if tool_name == "add_transaction":
-            return add_transaction(**args)
+            args.pop("user_id", None)
+            return add_transaction(user_id=user_id, **args)
         elif tool_name == "query_transactions":
-            return query_transactions(period=args.get("period", "this_month"), category=args.get("category"))
+            return query_transactions(user_id=user_id, period=args.get("period", "this_month"), category=args.get("category"))
         elif tool_name == "set_budget":
-            return set_budget(args["category"], args["monthly_limit"])
+            return set_budget(user_id, args["category"], args["monthly_limit"])
         elif tool_name == "check_budget_status":
-            return check_budget_status()
+            return check_budget_status(user_id)
         else:
             return f"Error: unknown tool '{tool_name}'"
     except Exception as e:
@@ -220,7 +256,7 @@ CHAT_SYSTEM_PROMPT = (
 )
 
 
-def run_finance_agent(user_message: str, history: list, log_callback=None, max_iterations: int = 5):
+def run_finance_agent(user_message: str, history: list, user_id: str, log_callback=None, max_iterations: int = 5):
     def log(msg):
         if log_callback:
             log_callback(msg)
@@ -240,8 +276,8 @@ def run_finance_agent(user_message: str, history: list, log_callback=None, max_i
         if message.tool_calls:
             for tool_call in message.tool_calls:
                 args = json.loads(tool_call.function.arguments)
-                log(f"🔧 {tool_call.function.name}({args})")
-                result = execute_tool(tool_call.function.name, args)
+                log(f"tool: {tool_call.function.name}({args})")
+                result = execute_tool(tool_call.function.name, args, user_id)
                 log(f"   -> {result[:200]}")
                 history.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
         else:
@@ -265,43 +301,64 @@ WEBHOOK_SYSTEM_PROMPT = (
 )
 
 
-def process_incoming_sms(raw_text: str) -> str:
+def process_incoming_sms(raw_text: str, user_id: str) -> str:
     messages = [
         {"role": "system", "content": WEBHOOK_SYSTEM_PROMPT},
         {"role": "user", "content": raw_text},
     ]
 
     for iteration in range(3):
-        print(f"  [webhook iteration {iteration + 1}]")
-
         try:
             response = groq_client.chat.completions.create(
                 model=MODEL_NAME, messages=messages, tools=TOOLS_SCHEMA, max_tokens=400,
             )
         except Exception as e:
-            print(f"  ❌ Groq API call failed: {e}")
             return f"API error: {e}"
 
         message = response.choices[0].message
         messages.append(message)
-
-        print(f"  [model content]: {message.content}")
-        print(f"  [tool_calls]: {message.tool_calls}")
 
         if message.tool_calls:
             for tool_call in message.tool_calls:
                 try:
                     args = json.loads(tool_call.function.arguments)
                 except json.JSONDecodeError as e:
-                    print(f"  ❌ Bad JSON from model: {tool_call.function.arguments}")
                     result = f"Error: invalid JSON arguments ({e})"
                 else:
                     args["raw_text"] = raw_text
-                    print(f"  [calling]: {tool_call.function.name}({args})")
-                    result = execute_tool(tool_call.function.name, args)
-                    print(f"  [result]: {result}")
+                    result = execute_tool(tool_call.function.name, args, user_id)
                 messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
         else:
             return message.content
 
     return "Could not process this message."
+
+
+# =================================================================
+# Monthly summary - used by the scheduled job (see monthly_summary.py)
+# =================================================================
+
+SUMMARY_SYSTEM_PROMPT = (
+    "You write short, friendly monthly finance summaries in Egyptian Arabic for a "
+    "Telegram message. Given raw category totals, write 3-5 sentences: total spent, "
+    "the top 1-2 spending categories, total income if any, and one brief, non-judgemental "
+    "observation. No headers, no markdown, just plain conversational text."
+)
+
+
+def build_monthly_summary_text(user_id: str) -> str | None:
+    """Returns a natural-language monthly summary, or None if the
+    user had no transactions last month (skip sending them a message)."""
+    raw_data = query_transactions(user_id, period="last_month")
+    if raw_data.startswith("No transactions"):
+        return None
+
+    response = groq_client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
+            {"role": "user", "content": raw_data},
+        ],
+        max_tokens=300,
+    )
+    return response.choices[0].message.content

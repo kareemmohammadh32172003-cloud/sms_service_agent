@@ -3,3 +3,5 @@ groq
 python-dotenv
 supabase
 gunicorn
+python-telegram-bot
+requests
