@@ -51,7 +51,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"ده الرابط الخاص بيك، حطه في تطبيق SMS Forwarder بتاعك:\n"
         f"{webhook_url}\n\n"
         f"أو ممكن كمان تلصق أي رسالة SMS هنا مباشرة وأنا هسجلها.\n\n"
-        f"الأوامر المتاحة: /today  /month  /lastmonth  /budgetstatus  /fix  /chart  /undo"
+        f"الأوامر المتاحة: /today  /month  /lastmonth  /budgetstatus  /fix  /chart  /undo  /subscriptions  /projection"
     )
 
 
@@ -113,6 +113,18 @@ async def undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(result)
 
 
+async def subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = core.get_or_create_user(update.effective_chat.id)
+    result = core.detect_recurring_subscriptions(user["id"])
+    await update.message.reply_text(result)
+
+
+async def projection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = core.get_or_create_user(update.effective_chat.id)
+    result = core.project_month_end_spending(user["id"])
+    await update.message.reply_text(result)
+
+
 PERIOD_ALIASES = {
     "today": "today", "month": "this_month", "lastmonth": "last_month",
 }
@@ -165,6 +177,8 @@ def main():
     app.add_handler(CommandHandler("budgetstatus", budget_status))
     app.add_handler(CommandHandler("fix", fix))
     app.add_handler(CommandHandler("undo", undo))
+    app.add_handler(CommandHandler("subscriptions", subscriptions))
+    app.add_handler(CommandHandler("projection", projection))
     app.add_handler(CommandHandler("chart", chart))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_raw_message))
 

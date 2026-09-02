@@ -19,6 +19,7 @@ import io
 import json
 import secrets
 import time
+import calendar
 import requests
 from datetime import datetime, date, timedelta
 from dotenv import load_dotenv
@@ -285,6 +286,89 @@ def check_budget_status(user_id: str) -> str:
     return "\n".join(results)
 
 
+# =================================================================
+# Proactive insights - subscription detection, anomaly alerts,
+# and month-end spending projection. These turn the assistant from
+# a passive logger into something that notices things on its own.
+# =================================================================
+
+def detect_recurring_subscriptions(user_id: str) -> str:
+    """Groups expenses by merchant (party) and flags ones that show
+    up in at least 2 different calendar months at a similar amount -
+    a strong signal of a recurring subscription/bill."""
+    rows = supabase.table("transactions").select("*") \
+        .eq("user_id", user_id).eq("type", "expense").execute().data
+
+    by_party = {}
+    for r in rows:
+        party = (r.get("party") or "").strip()
+        if not party or party.lower() in ("n/a", "none"):
+            continue
+        by_party.setdefault(party, []).append(r)
+
+    recurring = []
+    for party, txns in by_party.items():
+        months_seen = {t["txn_date"][:7] for t in txns}
+        if len(months_seen) < 2:
+            continue
+        amounts = [t["amount"] for t in txns]
+        avg = sum(amounts) / len(amounts)
+        spread = max(amounts) - min(amounts)
+        # tolerant of small variation (e.g. price changes, rounding)
+        if spread <= max(avg * 0.15, 15):
+            recurring.append((party, avg, len(months_seen)))
+
+    if not recurring:
+        return "لسه معنديش بيانات كفاية أرصد بيها اشتراكات متكررة (محتاجين شهرين على الأقل من نفس الجهة)."
+
+    recurring.sort(key=lambda x: -x[1])
+    lines = [f"  • {party} - ~{avg:.2f} جنيه/شهر (ظهرت في {months} شهر)" for party, avg, months in recurring]
+    total = sum(avg for _, avg, _ in recurring)
+    return "الاشتراكات/المدفوعات المتكررة اللي رصدتها:\n" + "\n".join(lines) + \
+           f"\n\nإجمالي تقديري شهريًا: {total:.2f} جنيه"
+
+
+def is_transaction_anomalous(user_id: str, amount: float) -> bool:
+    """Flags an expense as unusually large compared to the user's
+    recent spending pattern (more than 3x their recent average)."""
+    rows = supabase.table("transactions").select("amount") \
+        .eq("user_id", user_id).eq("type", "expense") \
+        .order("created_at", desc=True).limit(16).execute().data
+
+    baseline = [r["amount"] for r in rows[1:]]  # skip the transaction just inserted
+    if len(baseline) < 5:
+        return False  # not enough history yet to judge what's "normal"
+
+    avg = sum(baseline) / len(baseline)
+    return amount > avg * 3 and amount > 200
+
+
+def project_month_end_spending(user_id: str) -> str:
+    """Extrapolates this month's spending pace to estimate the
+    likely total by month-end, based on the daily average so far."""
+    now = datetime.now()
+    day_of_month = now.day
+
+    if day_of_month < 3:
+        return "لسه الشهر بدأ من أيام قليلة، محتاجين بيانات أكتر عشان نطلعلك توقع دقيق."
+
+    totals = get_expense_category_totals(user_id, period="this_month")
+    spent_so_far = sum(totals.values())
+    if spent_so_far == 0:
+        return "مفيش مصاريف مسجلة الشهر ده لحد دلوقتي."
+
+    days_in_month = calendar.monthrange(now.year, now.month)[1]
+    daily_rate = spent_so_far / day_of_month
+    projected = daily_rate * days_in_month
+
+    return (
+        f"صرفت لحد دلوقتي: {spent_so_far:.2f} جنيه في {day_of_month} يوم "
+        f"(بمعدل {daily_rate:.2f} جنيه/يوم).\n\n"
+        f"لو استمريت بنفس المعدل، المتوقع إجمالي مصاريف الشهر يوصل لحوالي "
+        f"{projected:.2f} جنيه."
+    )
+
+
 EGYPTIAN_BANK_SMS_EXAMPLES = """
 Real-world examples of Egyptian bank/wallet SMS formats and how to read them
 (the exact wording varies by provider, but these patterns are common):
@@ -509,7 +593,7 @@ def _call_groq_with_retry(messages, max_tokens: int, max_retries: int = 3):
     raise last_error
 
 
-def _notify_transaction_recorded(telegram_chat_id: int, args: dict, result: str) -> None:
+def _notify_transaction_recorded(telegram_chat_id: int, args: dict, result: str, user_id: str) -> None:
     """Sends an immediate Telegram confirmation whenever a webhook-forwarded
     SMS gets successfully recorded as a transaction, so the user finds out
     right away instead of only when they next check the bot."""
@@ -522,6 +606,8 @@ def _notify_transaction_recorded(telegram_chat_id: int, args: dict, result: str)
         text = f"💰 دخل جديد: +{amount} جنيه\nمن: {party}\nالفئة: {category}"
     else:
         text = f"💸 مصروف جديد: -{amount} جنيه\nلصالح: {party}\nالفئة: {category}"
+        if is_transaction_anomalous(user_id, amount):
+            text = "⚠️ العملية دي أكبر بكتير من معدل مصاريفك المعتاد - اتأكد إنها صح!\n\n" + text
 
     send_telegram_alert(telegram_chat_id, text)
 
@@ -557,7 +643,7 @@ def process_incoming_sms(raw_text: str, user_id: str, telegram_chat_id: int = No
                     args["raw_text"] = raw_text
                     result = execute_tool(tool_call.function.name, args, user_id)
                     if tool_call.function.name == "add_transaction" and result.startswith("Recorded:"):
-                        _notify_transaction_recorded(telegram_chat_id, args, result)
+                        _notify_transaction_recorded(telegram_chat_id, args, result, user_id)
                 messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
         else:
             return message.content
