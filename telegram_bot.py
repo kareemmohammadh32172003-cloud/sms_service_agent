@@ -131,10 +131,26 @@ async def chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_photo(photo=io.BytesIO(image_bytes))
 
 
+# Per-user conversation memory for the interactive agent, so it can
+# handle follow-up questions ("قولي العمليات دي") rather than treating
+# every typed message as a fresh, isolated request. In-memory only -
+# resets on redeploy, which is fine (worst case: agent forgets recent
+# chat context, but all recorded transactions themselves are safe in
+# Supabase regardless).
+_conversation_histories = {}
+
+
 async def handle_raw_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Any plain text that isn't a command is treated like a forwarded SMS."""
+    """Any plain text that isn't a command goes through the interactive
+    agent - it can record a pasted SMS (same as before) AND answer
+    follow-up questions like 'list these transactions' or 'how much
+    did I spend on food', because unlike the one-way webhook path it's
+    allowed to use query_transactions and hold a conversation."""
     user = core.get_or_create_user(update.effective_chat.id)
-    result = core.process_incoming_sms(update.message.text, user_id=user["id"])
+    chat_id = update.effective_chat.id
+    history = _conversation_histories.setdefault(chat_id, [])
+
+    result = core.run_finance_agent(update.message.text, history, user_id=user["id"])
     await update.message.reply_text(result)
 
 

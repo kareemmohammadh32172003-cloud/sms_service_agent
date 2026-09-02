@@ -182,24 +182,28 @@ def query_transactions(user_id: str, period: str = "this_month", category: str =
     if not rows:
         return f"No transactions found for period '{period}'" + (f" in category '{category}'" if category else "")
 
-    totals = {}
+    # Group individual transactions under their category, so the
+    # user sees each item (party, amount) not just a category total.
+    by_category = {}
     for r in rows:
         key = (r["category"], r["type"])
-        totals.setdefault(key, {"sum": 0.0, "count": 0})
-        totals[key]["sum"] += r["amount"]
-        totals[key]["count"] += 1
+        by_category.setdefault(key, []).append(r)
 
     lines = []
     total_expense = 0.0
     total_income = 0.0
-    for (cat, type_), agg in totals.items():
-        lines.append(f"- {cat} ({type_}): {agg['sum']:.2f} EGP across {agg['count']} transaction(s)")
+    for (cat, type_), txns in sorted(by_category.items(), key=lambda kv: -sum(t["amount"] for t in kv[1])):
+        cat_total = sum(t["amount"] for t in txns)
+        lines.append(f"\n{cat} ({type_}) - {cat_total:.2f} EGP total:")
+        for t in sorted(txns, key=lambda t: t.get("created_at", ""), reverse=True):
+            party = t.get("party") or "N/A"
+            lines.append(f"  • {t['amount']:.2f} EGP - {party}")
         if type_ == "expense":
-            total_expense += agg["sum"]
+            total_expense += cat_total
         else:
-            total_income += agg["sum"]
+            total_income += cat_total
 
-    summary = f"Period: {period}\n" + "\n".join(lines)
+    summary = f"Period: {period}" + "\n".join(lines)
     summary += f"\n\nTotal expenses: {total_expense:.2f} EGP | Total income: {total_income:.2f} EGP"
     return summary
 
@@ -407,7 +411,9 @@ CHAT_SYSTEM_PROMPT = (
     "For the category: if the merchant name clearly implies one category, use it "
     "directly. But if the merchant is a general store where the purchase could "
     "reasonably be several categories, ask the user to clarify BEFORE recording. "
-    "When the user asks about their spending, use query_transactions. "
+    "When the user asks about their spending, or asks you to list/show/detail "
+    "their recent transactions, use query_transactions - it already returns an "
+    "itemized breakdown grouped by category, so just relay it clearly. "
     "Always confirm what you recorded in a short, clear sentence."
     + "\n\n" + EGYPTIAN_BANK_SMS_EXAMPLES
 )
