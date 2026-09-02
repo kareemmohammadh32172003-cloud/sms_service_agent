@@ -17,7 +17,7 @@ deployment without seeing each other's data.
 import os
 import json
 import secrets
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from dotenv import load_dotenv
 from groq import Groq
 from supabase import create_client
@@ -72,12 +72,35 @@ def list_all_users() -> list[dict]:
 # Tools - same signatures as before, all scoped by user_id
 # =================================================================
 
+DUPLICATE_WINDOW_MINUTES = 10
+
+
+def _is_likely_duplicate(user_id: str, raw_text: str, amount: float) -> bool:
+    """Guards against the same SMS being forwarded twice (some SMS
+    Forwarder apps retry on flaky connections). Same user, same raw
+    text, same amount, within a short time window = duplicate."""
+    if not raw_text:
+        return False
+
+    cutoff = (datetime.utcnow() - timedelta(minutes=DUPLICATE_WINDOW_MINUTES)).isoformat()
+    rows = supabase.table("transactions").select("id") \
+        .eq("user_id", user_id) \
+        .eq("raw_text", raw_text) \
+        .eq("amount", amount) \
+        .gte("created_at", cutoff) \
+        .execute().data
+    return len(rows) > 0
+
+
 def add_transaction(user_id: str, amount: float, category: str, type: str,
                      party: str = "", raw_text: str = "", txn_date: str = None) -> str:
     if category not in VALID_CATEGORIES:
         category = "other"
     if type not in ("expense", "income"):
         return f"Error: type must be 'expense' or 'income', got '{type}'"
+
+    if _is_likely_duplicate(user_id, raw_text, amount):
+        return "Skipped: this looks like a duplicate of a transaction recorded a few minutes ago."
 
     txn_date = txn_date or date.today().isoformat()
 
@@ -93,6 +116,30 @@ def add_transaction(user_id: str, amount: float, category: str, type: str,
 
     sign = "-" if type == "expense" else "+"
     return f"Recorded: {sign}{amount} EGP | {category} | {party or 'N/A'}"
+
+
+def get_last_transaction(user_id: str) -> dict | None:
+    rows = supabase.table("transactions").select("*") \
+        .eq("user_id", user_id) \
+        .order("created_at", desc=True) \
+        .limit(1).execute().data
+    return rows[0] if rows else None
+
+
+def correct_last_transaction_category(user_id: str, new_category: str) -> str:
+    if new_category not in VALID_CATEGORIES:
+        return f"Unknown category '{new_category}'. Valid options: {', '.join(VALID_CATEGORIES)}"
+
+    last = get_last_transaction(user_id)
+    if not last:
+        return "You don't have any recorded transactions yet."
+
+    old_category = last["category"]
+    supabase.table("transactions").update({"category": new_category}).eq("id", last["id"]).execute()
+
+    sign = "-" if last["type"] == "expense" else "+"
+    return (f"Fixed: {sign}{last['amount']} EGP | {last['party'] or 'N/A'} "
+            f"moved from '{old_category}' to '{new_category}'")
 
 
 def query_transactions(user_id: str, period: str = "this_month", category: str = None) -> str:
