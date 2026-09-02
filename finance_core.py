@@ -503,6 +503,23 @@ def _call_groq_with_retry(messages, max_tokens: int, max_retries: int = 3):
     raise last_error
 
 
+def _notify_transaction_recorded(telegram_chat_id: int, args: dict, result: str) -> None:
+    """Sends an immediate Telegram confirmation whenever a webhook-forwarded
+    SMS gets successfully recorded as a transaction, so the user finds out
+    right away instead of only when they next check the bot."""
+    amount = args.get("amount", 0)
+    category = args.get("category", "other")
+    party = args.get("party") or "غير معروف"
+    txn_type = args.get("type")
+
+    if txn_type == "income":
+        text = f"💰 دخل جديد: +{amount} جنيه\nمن: {party}\nالفئة: {category}"
+    else:
+        text = f"💸 مصروف جديد: -{amount} جنيه\nلصالح: {party}\nالفئة: {category}"
+
+    send_telegram_alert(telegram_chat_id, text)
+
+
 def process_incoming_sms(raw_text: str, user_id: str, telegram_chat_id: int = None) -> str:
     messages = [
         {"role": "system", "content": WEBHOOK_SYSTEM_PROMPT},
@@ -533,6 +550,8 @@ def process_incoming_sms(raw_text: str, user_id: str, telegram_chat_id: int = No
                 else:
                     args["raw_text"] = raw_text
                     result = execute_tool(tool_call.function.name, args, user_id)
+                    if tool_call.function.name == "add_transaction" and result.startswith("Recorded:"):
+                        _notify_transaction_recorded(telegram_chat_id, args, result)
                 messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
         else:
             return message.content
