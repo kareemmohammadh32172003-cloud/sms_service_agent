@@ -268,6 +268,47 @@ def check_budget_status(user_id: str) -> str:
     return "\n".join(results)
 
 
+EGYPTIAN_BANK_SMS_EXAMPLES = """
+Real-world examples of Egyptian bank/wallet SMS formats and how to read them
+(the exact wording varies by provider, but these patterns are common):
+
+1. "تم خصم مبلغ 250.00 جنيه من حسابك رقم *1234 لصالح كارفور بتاريخ 01-09-2026"
+   -> type=expense, amount=250.00, party="كارفور", category=food or shopping
+
+2. "تم سحب مبلغ 1000.00 جنيه من رصيدك عن طريق ماكينة الصراف الآلي ATM"
+   -> type=expense, amount=1000.00, party="ATM withdrawal", category=other
+   (a raw cash withdrawal - the money left the account, but there's no
+   merchant, so don't guess a spending category; use 'other')
+
+3. "تم إيداع مبلغ 15000.00 جنيه في حسابك - مرتب شهر أغسطس"
+   -> type=income, amount=15000.00, party="راتب", category=salary
+
+4. "تم تحويل مبلغ 500.00 جنيه من حسابك عبر انستاباي InstaPay إلى محمد أحمد"
+   -> type=expense, amount=500.00, party="محمد أحمد", category=transfer
+   (InstaPay/mobile transfers OUT of the account are an expense of type 'transfer')
+
+5. "تم استلام تحويل بمبلغ 300.00 جنيه من InstaPay من سارة علي"
+   -> type=income, amount=300.00, party="سارة علي", category=transfer
+
+6. "تم خصم 100.00 جنيه من محفظة فودافون كاش الخاصة بك لصالح شحن رصيد"
+   -> type=expense, amount=100.00, party="شحن رصيد", category=bills
+
+7. "تم إضافة رصيد بمبلغ 200.00 جنيه إلى محفظة أورانج موني الخاصة بك"
+   -> type=income, amount=200.00, party="أورانج موني", category=transfer
+
+8. "عزيزنا العميل، تم خصم 89.99 جنيه اشتراك شهري - نتفليكس"
+   -> type=expense, amount=89.99, party="نتفليكس", category=entertainment
+
+Key signal words:
+  Expense (money leaving): تم خصم, تم سحب, تم تحويل ... إلى/الى, دفعت, اشتراك
+  Income (money arriving): تم إيداع, تم استلام, تم إضافة رصيد, راتب/مرتب, تحويل ... من
+
+Not a transaction at all - reply 'not a transaction', do not call add_transaction:
+  OTP / verification codes ("رمز التحقق الخاص بك هو..."), promotional offers,
+  balance-check confirmations with no amount changing hands.
+"""
+
+
 TOOLS_SCHEMA = [
     {"type": "function", "function": {
         "name": "add_transaction",
@@ -355,6 +396,7 @@ CHAT_SYSTEM_PROMPT = (
     "reasonably be several categories, ask the user to clarify BEFORE recording. "
     "When the user asks about their spending, use query_transactions. "
     "Always confirm what you recorded in a short, clear sentence."
+    + "\n\n" + EGYPTIAN_BANK_SMS_EXAMPLES
 )
 
 
@@ -411,6 +453,7 @@ WEBHOOK_SYSTEM_PROMPT = (
     "When genuinely ambiguous, prefer 'expense' only if there is a debit-like verb; "
     "otherwise still record your best guess rather than skipping it - never leave "
     "a real transaction unrecorded just because you're unsure of the category."
+    + "\n\n" + EGYPTIAN_BANK_SMS_EXAMPLES
 )
 
 
