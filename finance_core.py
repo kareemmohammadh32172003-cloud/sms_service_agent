@@ -18,6 +18,8 @@ import os
 import io
 import json
 import secrets
+import time
+import requests
 from datetime import datetime, date, timedelta
 from dotenv import load_dotenv
 from groq import Groq
@@ -144,6 +146,17 @@ def correct_last_transaction_category(user_id: str, new_category: str) -> str:
     sign = "-" if last["type"] == "expense" else "+"
     return (f"Fixed: {sign}{last['amount']} EGP | {last['party'] or 'N/A'} "
             f"moved from '{old_category}' to '{new_category}'")
+
+
+def delete_last_transaction(user_id: str) -> str:
+    last = get_last_transaction(user_id)
+    if not last:
+        return "You don't have any recorded transactions yet."
+
+    supabase.table("transactions").delete().eq("id", last["id"]).execute()
+
+    sign = "-" if last["type"] == "expense" else "+"
+    return f"Deleted: {sign}{last['amount']} EGP | {last['category']} | {last['party'] or 'N/A'}"
 
 
 def query_transactions(user_id: str, period: str = "this_month", category: str = None) -> str:
@@ -457,7 +470,40 @@ WEBHOOK_SYSTEM_PROMPT = (
 )
 
 
-def process_incoming_sms(raw_text: str, user_id: str) -> str:
+def send_telegram_alert(chat_id: int, text: str) -> None:
+    """Best-effort notification - never raises, so a failed alert
+    can't itself crash the caller."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token or not chat_id:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text}, timeout=10,
+        )
+    except Exception:
+        pass
+
+
+def _call_groq_with_retry(messages, max_tokens: int, max_retries: int = 3):
+    """Retries transient Groq API failures with exponential backoff
+    (1s, 2s, 4s) before giving up. Network hiccups and rate limits
+    are common with external APIs and shouldn't silently lose a
+    financial transaction on the first blip."""
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            return groq_client.chat.completions.create(
+                model=MODEL_NAME, messages=messages, tools=TOOLS_SCHEMA, max_tokens=max_tokens,
+            )
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+    raise last_error
+
+
+def process_incoming_sms(raw_text: str, user_id: str, telegram_chat_id: int = None) -> str:
     messages = [
         {"role": "system", "content": WEBHOOK_SYSTEM_PROMPT},
         {"role": "user", "content": raw_text},
@@ -465,11 +511,15 @@ def process_incoming_sms(raw_text: str, user_id: str) -> str:
 
     for iteration in range(3):
         try:
-            response = groq_client.chat.completions.create(
-                model=MODEL_NAME, messages=messages, tools=TOOLS_SCHEMA, max_tokens=400,
-            )
+            response = _call_groq_with_retry(messages, max_tokens=400)
         except Exception as e:
-            return f"API error: {e}"
+            send_telegram_alert(
+                telegram_chat_id,
+                "⚠️ وصلتني رسالة SMS بس معرفتش أعالجها بسبب مشكلة مؤقتة في الاتصال.\n"
+                "ممكن تبعتها تاني هنا في الشات وأنا هسجلها؟\n\n"
+                f"الرسالة: {raw_text[:200]}"
+            )
+            return f"API error after retries: {e}"
 
         message = response.choices[0].message
         messages.append(message)
