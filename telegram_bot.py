@@ -50,7 +50,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"ده الرابط الخاص بيك، حطه في تطبيق SMS Forwarder بتاعك:\n"
         f"{webhook_url}\n\n"
         f"أو ممكن كمان تلصق أي رسالة SMS هنا مباشرة وأنا هسجلها.\n\n"
-        f"الأوامر المتاحة: /today  /month  /lastmonth  /budgetstatus"
+        f"الأوامر المتاحة: /today  /month  /lastmonth  /budgetstatus  /fix"
     )
 
 
@@ -93,6 +93,19 @@ async def budget_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(result)
 
 
+async def fix(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = core.get_or_create_user(update.effective_chat.id)
+    if not context.args:
+        await update.message.reply_text(
+            "استخدم الصيغة: /fix food\n"
+            f"الفئات المتاحة: {', '.join(core.VALID_CATEGORIES)}"
+        )
+        return
+    new_category = context.args[0].lower()
+    result = core.correct_last_transaction_category(user["id"], new_category)
+    await update.message.reply_text(result)
+
+
 async def handle_raw_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Any plain text that isn't a command is treated like a forwarded SMS."""
     user = core.get_or_create_user(update.effective_chat.id)
@@ -109,6 +122,7 @@ def main():
     app.add_handler(CommandHandler("lastmonth", lastmonth))
     app.add_handler(CommandHandler("budget", budget))
     app.add_handler(CommandHandler("budgetstatus", budget_status))
+    app.add_handler(CommandHandler("fix", fix))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_raw_message))
 
     app.run_polling()
