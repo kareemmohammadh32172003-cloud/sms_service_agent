@@ -51,6 +51,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"ده الرابط الخاص بيك، حطه في تطبيق SMS Forwarder بتاعك:\n"
         f"{webhook_url}\n\n"
         f"أو ممكن كمان تلصق أي رسالة SMS هنا مباشرة وأنا هسجلها.\n\n"
+        f"وكمان تقدر تقولي بصوتك أو بكلامك العادي على أي مصروف كاش (زي "
+        f"'دفعت 50 جنيه تاكسي')، مش لازم يكون رسالة بنك رسمية.\n\n"
         f"الأوامر المتاحة: /today  /month  /lastmonth  /budgetstatus  /fix  /chart  /undo  /subscriptions  /projection"
     )
 
@@ -166,6 +168,32 @@ async def handle_raw_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text(result)
 
 
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Voice notes get transcribed then run through the exact same
+    conversational pipeline as typed messages - the easiest way to
+    log cash spending (taxi, street food, small purchases) that no
+    bank SMS will ever capture."""
+    user = core.get_or_create_user(update.effective_chat.id)
+    chat_id = update.effective_chat.id
+
+    voice_file = await context.bot.get_file(update.message.voice.file_id)
+    audio_bytes = bytes(await voice_file.download_as_bytearray())
+
+    try:
+        transcribed_text = core.transcribe_voice(audio_bytes)
+    except Exception as e:
+        await update.message.reply_text(f"معرفتش أفهم الرسالة الصوتية، جرب تاني أو اكتبها. ({e})")
+        return
+
+    if not transcribed_text.strip():
+        await update.message.reply_text("معرفتش أسمع حاجة واضحة في الرسالة، جرب تاني.")
+        return
+
+    history = _conversation_histories.setdefault(chat_id, [])
+    result = core.run_finance_agent(transcribed_text, history, user_id=user["id"])
+    await update.message.reply_text(f"🎤 سمعت: \"{transcribed_text}\"\n\n{result}")
+
+
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -181,6 +209,7 @@ def main():
     app.add_handler(CommandHandler("projection", projection))
     app.add_handler(CommandHandler("chart", chart))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_raw_message))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
     app.run_polling()
 

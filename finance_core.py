@@ -488,6 +488,15 @@ CHAT_SYSTEM_PROMPT = (
     "You are a personal finance assistant. When the user pastes a raw bank or "
     "e-wallet SMS notification, extract the transaction details and record them "
     "using add_transaction. "
+    "IMPORTANT - cash spending: bank/wallet SMS never captures cash transactions "
+    "(taxi fare, street food, small purchases), so the user will often just tell "
+    "you in plain language instead, e.g. 'دفعت 50 جنيه تاكسي' or 'اشتريت فطار بـ30 "
+    "جنيه' or 'paid 100 for groceries in cash'. Treat these exactly like an SMS - "
+    "extract the amount, category, and party, and call add_transaction. Don't wait "
+    "for a formal bank-style message; any clear statement that money was spent or "
+    "received is enough to record, whether typed directly or transcribed from a "
+    "voice message (transcriptions may have minor spelling errors - use context "
+    "and don't reject a message just because the wording is imperfect). "
     "Carefully decide type='income' (money arriving: deposits, salary, incoming "
     "transfers, refunds) vs type='expense' (money leaving: purchases, debits, "
     "withdrawals, bill payments) based on the wording, including Arabic phrasing "
@@ -501,6 +510,19 @@ CHAT_SYSTEM_PROMPT = (
     "Always confirm what you recorded in a short, clear sentence."
     + "\n\n" + EGYPTIAN_BANK_SMS_EXAMPLES
 )
+
+
+def transcribe_voice(audio_bytes: bytes, filename: str = "voice.ogg") -> str:
+    """Transcribes a voice note to text using Groq's Whisper model, so
+    the user can log cash spending by talking instead of typing."""
+    buf = io.BytesIO(audio_bytes)
+    buf.name = filename
+    transcription = groq_client.audio.transcriptions.create(
+        file=buf,
+        model="whisper-large-v3",
+        language="ar",
+    )
+    return transcription.text
 
 
 def run_finance_agent(user_message: str, history: list, user_id: str, log_callback=None, max_iterations: int = 5):
