@@ -5,3 +5,4 @@ supabase
 gunicorn
 python-telegram-bot
 requests
+matplotlib

@@ -15,12 +15,16 @@ deployment without seeing each other's data.
 """
 
 import os
+import io
 import json
 import secrets
 from datetime import datetime, date, timedelta
 from dotenv import load_dotenv
 from groq import Groq
 from supabase import create_client
+import matplotlib
+matplotlib.use("Agg")  # headless server, no display available
+import matplotlib.pyplot as plt
 
 load_dotenv()
 
@@ -185,6 +189,53 @@ def query_transactions(user_id: str, period: str = "this_month", category: str =
     summary = f"Period: {period}\n" + "\n".join(lines)
     summary += f"\n\nTotal expenses: {total_expense:.2f} EGP | Total income: {total_income:.2f} EGP"
     return summary
+
+
+def get_expense_category_totals(user_id: str, period: str = "this_month") -> dict:
+    """Same filtering logic as query_transactions, but returns raw
+    {category: total_amount} for expenses only - used to draw charts."""
+    now = datetime.now()
+    query = supabase.table("transactions").select("*").eq("user_id", user_id).eq("type", "expense")
+
+    if period == "this_month":
+        query = query.gte("txn_date", f"{now.strftime('%Y-%m')}-01")
+    elif period == "today":
+        query = query.eq("txn_date", date.today().isoformat())
+    elif period == "last_month":
+        last_month = now.month - 1 or 12
+        year = now.year if now.month > 1 else now.year - 1
+        query = query.gte("txn_date", f"{year}-{last_month:02d}-01") \
+                      .lt("txn_date", f"{now.strftime('%Y-%m')}-01")
+
+    rows = query.execute().data
+    totals = {}
+    for r in rows:
+        totals[r["category"]] = totals.get(r["category"], 0.0) + r["amount"]
+    return totals
+
+
+def build_expense_pie_chart(user_id: str, period: str = "this_month") -> bytes | None:
+    """Renders a PNG pie chart of expenses by category. Returns None
+    if there's nothing to chart (so the caller can send a plain
+    'no data' message instead of a blank image)."""
+    totals = get_expense_category_totals(user_id, period)
+    if not totals:
+        return None
+
+    labels = list(totals.keys())
+    values = list(totals.values())
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.pie(values, labels=labels, autopct="%1.1f%%", startangle=90,
+           textprops={"fontsize": 11})
+    ax.axis("equal")
+    ax.set_title(f"Expenses by category — {period.replace('_', ' ')}")
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", dpi=150)
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
 
 
 def set_budget(user_id: str, category: str, monthly_limit: float) -> str:

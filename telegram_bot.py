@@ -25,6 +25,7 @@ Run:
 """
 
 import os
+import io
 import logging
 from dotenv import load_dotenv
 from telegram import Update
@@ -50,7 +51,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"ده الرابط الخاص بيك، حطه في تطبيق SMS Forwarder بتاعك:\n"
         f"{webhook_url}\n\n"
         f"أو ممكن كمان تلصق أي رسالة SMS هنا مباشرة وأنا هسجلها.\n\n"
-        f"الأوامر المتاحة: /today  /month  /lastmonth  /budgetstatus  /fix"
+        f"الأوامر المتاحة: /today  /month  /lastmonth  /budgetstatus  /fix  /chart"
     )
 
 
@@ -106,6 +107,24 @@ async def fix(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(result)
 
 
+PERIOD_ALIASES = {
+    "today": "today", "month": "this_month", "lastmonth": "last_month",
+}
+
+
+async def chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = core.get_or_create_user(update.effective_chat.id)
+    period_arg = context.args[0].lower() if context.args else "month"
+    period = PERIOD_ALIASES.get(period_arg, "this_month")
+
+    image_bytes = core.build_expense_pie_chart(user["id"], period=period)
+    if image_bytes is None:
+        await update.message.reply_text("مفيش مصاريف مسجلة للفترة دي عشان أرسم بيها.")
+        return
+
+    await update.message.reply_photo(photo=io.BytesIO(image_bytes))
+
+
 async def handle_raw_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Any plain text that isn't a command is treated like a forwarded SMS."""
     user = core.get_or_create_user(update.effective_chat.id)
@@ -123,6 +142,7 @@ def main():
     app.add_handler(CommandHandler("budget", budget))
     app.add_handler(CommandHandler("budgetstatus", budget_status))
     app.add_handler(CommandHandler("fix", fix))
+    app.add_handler(CommandHandler("chart", chart))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_raw_message))
 
     app.run_polling()
