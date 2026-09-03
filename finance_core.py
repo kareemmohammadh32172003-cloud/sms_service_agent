@@ -82,29 +82,30 @@ def list_all_users() -> list[dict]:
 DUPLICATE_WINDOW_MINUTES = 60
 
 
-def _is_likely_duplicate(user_id: str, amount: float, party: str, type: str) -> bool:
-    """Guards against the same SMS being forwarded twice, without the
-    false-positive risk of blocking two genuinely different people who
-    happen to send the same amount. Same amount + same direction within
-    the window, AND the party names are similar (one contains the
-    other, e.g. 'X' vs 'X جماعة' from the AI extracting a retry
-    slightly differently) - not just any two unrelated names."""
+DUPLICATE_WINDOW_MINUTES = 1440  # 24 hours - generous enough to catch delayed retries
+
+
+def _is_likely_duplicate(user_id: str, raw_text: str, amount: float, type: str) -> bool:
+    """Guards against the same SMS being forwarded twice. Matches on
+    the exact raw SMS text (not the AI-extracted party name, which can
+    vary slightly between identical retries) plus amount and direction.
+    A true retry resends byte-identical text, so this has virtually no
+    risk of blocking two genuinely different real transactions - even
+    if the same person sends the same amount twice, real bank/wallet
+    SMS almost always differs in wording (reference number, balance,
+    timestamp embedded in the text itself)."""
+    if not raw_text:
+        return False  # nothing to compare against - don't block
+
     cutoff = (datetime.utcnow() - timedelta(minutes=DUPLICATE_WINDOW_MINUTES)).isoformat()
-    rows = supabase.table("transactions").select("id, party") \
+    rows = supabase.table("transactions").select("id") \
         .eq("user_id", user_id) \
+        .eq("raw_text", raw_text) \
         .eq("amount", amount) \
         .eq("type", type) \
         .gte("created_at", cutoff) \
         .execute().data
-
-    party_norm = (party or "").strip().lower()
-    for r in rows:
-        existing_norm = (r.get("party") or "").strip().lower()
-        if not party_norm and not existing_norm:
-            return True  # both missing a party (e.g. ATM withdrawals) - treat as duplicate
-        if party_norm and existing_norm and (party_norm in existing_norm or existing_norm in party_norm):
-            return True
-    return False
+    return len(rows) > 0
 
 
 def add_transaction(user_id: str, amount: float, category: str, type: str,
@@ -114,7 +115,7 @@ def add_transaction(user_id: str, amount: float, category: str, type: str,
     if type not in ("expense", "income"):
         return f"Error: type must be 'expense' or 'income', got '{type}'"
 
-    if _is_likely_duplicate(user_id, amount, party, type):
+    if _is_likely_duplicate(user_id, raw_text, amount, type):
         return "Skipped: this looks like a duplicate of a transaction recorded recently."
 
     txn_date = txn_date or date.today().isoformat()
