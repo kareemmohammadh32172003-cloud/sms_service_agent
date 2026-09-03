@@ -83,20 +83,19 @@ DUPLICATE_WINDOW_MINUTES = 60
 
 
 def _is_likely_duplicate(user_id: str, amount: float, party: str, type: str) -> bool:
-    """Guards against the same SMS being forwarded twice (some SMS
-    Forwarder apps retry with slightly reformatted text on flaky
-    connections, so we deliberately don't compare raw_text exactly -
-    same amount + same party + same direction within an hour is
-    treated as the same real-world transaction)."""
+    """Guards against the same SMS being forwarded twice. Deliberately
+    ignores 'party' for matching - the AI's extraction of the merchant/
+    sender name can vary slightly between retries of the same message
+    (e.g. 'X' vs 'X جماعة'), so requiring an exact party match let real
+    duplicates slip through. Same amount + same direction within the
+    window is treated as the same real-world transaction."""
     cutoff = (datetime.utcnow() - timedelta(minutes=DUPLICATE_WINDOW_MINUTES)).isoformat()
-    query = supabase.table("transactions").select("id") \
+    rows = supabase.table("transactions").select("id") \
         .eq("user_id", user_id) \
         .eq("amount", amount) \
         .eq("type", type) \
-        .gte("created_at", cutoff)
-    if party:
-        query = query.eq("party", party)
-    rows = query.execute().data
+        .gte("created_at", cutoff) \
+        .execute().data
     return len(rows) > 0
 
 
