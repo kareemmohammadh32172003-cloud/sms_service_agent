@@ -63,6 +63,16 @@ def get_or_create_user(telegram_chat_id: int, display_name: str = "") -> dict:
     return row[0]
 
 
+def get_registered_user(telegram_chat_id: int) -> dict | None:
+    """Looks up an already-registered user WITHOUT creating a new
+    account. Used to gate access - only people who registered via
+    /start with a valid invite code get an account in the first
+    place, so this simply returns None for anyone else."""
+    rows = supabase.table("users").select("*") \
+        .eq("telegram_chat_id", telegram_chat_id).execute().data
+    return rows[0] if rows else None
+
+
 def get_user_by_token(token: str) -> dict | None:
     """Looks up which user a webhook request belongs to, based on
     the token in their personal webhook URL."""

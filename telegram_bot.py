@@ -38,11 +38,31 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 PUBLIC_BASE = os.getenv("PUBLIC_WEBHOOK_BASE", "https://your-app.up.railway.app")
+ACCESS_CODE = os.getenv("BOT_ACCESS_CODE")  # required to register - keeps the bot private
+
+NOT_REGISTERED_MSG = "لسه معملتش /start بكود الدعوة الصح. اطلب الكود من صاحب البوت الأول."
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     name = update.effective_user.first_name or ""
+
+    existing = core.get_registered_user(chat_id)
+    if not existing:
+        if not ACCESS_CODE:
+            # Safety net: if no code is configured on the server at all,
+            # fail closed (deny) rather than silently allowing everyone in.
+            await update.message.reply_text("التسجيل مقفول مؤقتًا - تواصل مع صاحب البوت.")
+            return
+        provided_code = context.args[0] if context.args else None
+        if provided_code != ACCESS_CODE:
+            await update.message.reply_text(
+                "البوت ده خاص. لازم تكتب /start متبوعًا بكود الدعوة، مثال:\n"
+                "/start CODE_HERE\n\n"
+                "اطلب الكود من صاحب البوت."
+            )
+            return
+
     user = core.get_or_create_user(chat_id, display_name=name)
 
     webhook_url = f"{PUBLIC_BASE}/sms-webhook/{user['api_token']}"
@@ -58,25 +78,37 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = core.get_or_create_user(update.effective_chat.id)
+    user = core.get_registered_user(update.effective_chat.id)
+    if not user:
+        await update.message.reply_text(NOT_REGISTERED_MSG)
+        return
     result = core.query_transactions(user["id"], period="today")
     await update.message.reply_text(result)
 
 
 async def month(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = core.get_or_create_user(update.effective_chat.id)
+    user = core.get_registered_user(update.effective_chat.id)
+    if not user:
+        await update.message.reply_text(NOT_REGISTERED_MSG)
+        return
     result = core.query_transactions(user["id"], period="this_month")
     await update.message.reply_text(result)
 
 
 async def lastmonth(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = core.get_or_create_user(update.effective_chat.id)
+    user = core.get_registered_user(update.effective_chat.id)
+    if not user:
+        await update.message.reply_text(NOT_REGISTERED_MSG)
+        return
     result = core.query_transactions(user["id"], period="last_month")
     await update.message.reply_text(result)
 
 
 async def budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = core.get_or_create_user(update.effective_chat.id)
+    user = core.get_registered_user(update.effective_chat.id)
+    if not user:
+        await update.message.reply_text(NOT_REGISTERED_MSG)
+        return
     if len(context.args) < 2:
         await update.message.reply_text("استخدم الصيغة: /budget food 2000")
         return
@@ -91,13 +123,19 @@ async def budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def budget_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = core.get_or_create_user(update.effective_chat.id)
+    user = core.get_registered_user(update.effective_chat.id)
+    if not user:
+        await update.message.reply_text(NOT_REGISTERED_MSG)
+        return
     result = core.check_budget_status(user["id"])
     await update.message.reply_text(result)
 
 
 async def fix(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = core.get_or_create_user(update.effective_chat.id)
+    user = core.get_registered_user(update.effective_chat.id)
+    if not user:
+        await update.message.reply_text(NOT_REGISTERED_MSG)
+        return
     if not context.args:
         await update.message.reply_text(
             "استخدم الصيغة: /fix food\n"
@@ -110,19 +148,28 @@ async def fix(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = core.get_or_create_user(update.effective_chat.id)
+    user = core.get_registered_user(update.effective_chat.id)
+    if not user:
+        await update.message.reply_text(NOT_REGISTERED_MSG)
+        return
     result = core.delete_last_transaction(user["id"])
     await update.message.reply_text(result)
 
 
 async def subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = core.get_or_create_user(update.effective_chat.id)
+    user = core.get_registered_user(update.effective_chat.id)
+    if not user:
+        await update.message.reply_text(NOT_REGISTERED_MSG)
+        return
     result = core.detect_recurring_subscriptions(user["id"])
     await update.message.reply_text(result)
 
 
 async def projection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = core.get_or_create_user(update.effective_chat.id)
+    user = core.get_registered_user(update.effective_chat.id)
+    if not user:
+        await update.message.reply_text(NOT_REGISTERED_MSG)
+        return
     result = core.project_month_end_spending(user["id"])
     await update.message.reply_text(result)
 
@@ -133,7 +180,10 @@ PERIOD_ALIASES = {
 
 
 async def chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = core.get_or_create_user(update.effective_chat.id)
+    user = core.get_registered_user(update.effective_chat.id)
+    if not user:
+        await update.message.reply_text(NOT_REGISTERED_MSG)
+        return
     period_arg = context.args[0].lower() if context.args else "month"
     period = PERIOD_ALIASES.get(period_arg, "this_month")
 
@@ -160,7 +210,10 @@ async def handle_raw_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     follow-up questions like 'list these transactions' or 'how much
     did I spend on food', because unlike the one-way webhook path it's
     allowed to use query_transactions and hold a conversation."""
-    user = core.get_or_create_user(update.effective_chat.id)
+    user = core.get_registered_user(update.effective_chat.id)
+    if not user:
+        await update.message.reply_text(NOT_REGISTERED_MSG)
+        return
     chat_id = update.effective_chat.id
     history = _conversation_histories.setdefault(chat_id, [])
 
@@ -173,7 +226,10 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conversational pipeline as typed messages - the easiest way to
     log cash spending (taxi, street food, small purchases) that no
     bank SMS will ever capture."""
-    user = core.get_or_create_user(update.effective_chat.id)
+    user = core.get_registered_user(update.effective_chat.id)
+    if not user:
+        await update.message.reply_text(NOT_REGISTERED_MSG)
+        return
     chat_id = update.effective_chat.id
 
     voice_file = await context.bot.get_file(update.message.voice.file_id)
