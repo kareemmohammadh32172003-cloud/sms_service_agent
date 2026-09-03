@@ -168,10 +168,27 @@ def correct_last_transaction_category(user_id: str, new_category: str) -> str:
             f"moved from '{old_category}' to '{new_category}'")
 
 
+UNDO_WINDOW_MINUTES = 30
+
+
 def delete_last_transaction(user_id: str) -> str:
     last = get_last_transaction(user_id)
     if not last:
         return "You don't have any recorded transactions yet."
+
+    created_at_raw = last.get("created_at")
+    if created_at_raw:
+        try:
+            created_dt = datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
+            age_minutes = (datetime.now(created_dt.tzinfo) - created_dt).total_seconds() / 60
+        except Exception:
+            age_minutes = None
+        if age_minutes is not None and age_minutes > UNDO_WINDOW_MINUTES:
+            return (
+                f"Cannot undo: this transaction is older than {UNDO_WINDOW_MINUTES} minutes "
+                f"(protects against accidentally deleting an old transaction by mistake). "
+                f"Use /fix to correct its category instead, or ask an admin for manual removal."
+            )
 
     supabase.table("transactions").delete().eq("id", last["id"]).execute()
 
@@ -476,6 +493,25 @@ TOOLS_SCHEMA = [
         "description": "Shows how much has been spent this month against each set budget.",
         "parameters": {"type": "object", "properties": {}}
     }},
+    {"type": "function", "function": {
+        "name": "delete_last_transaction",
+        "description": "Deletes the single most recently recorded transaction. Only works if "
+                        "it was recorded within the last 30 minutes (protects against accidentally "
+                        "deleting an old transaction). Use this when the user asks to undo, delete, "
+                        "or remove the last thing they logged - e.g. 'امسحلي آخر رسالة', 'شيل العملية دي'.",
+        "parameters": {"type": "object", "properties": {}}
+    }},
+    {"type": "function", "function": {
+        "name": "correct_last_transaction_category",
+        "description": "Changes only the category of the most recently recorded transaction. "
+                        "Use this when the user asks to fix, correct, or change the category of "
+                        "the last thing they logged - e.g. 'عدلها لفئة كذا', 'دي مش أكل دي مواصلات'.",
+        "parameters": {
+            "type": "object",
+            "properties": {"new_category": {"type": "string", "enum": VALID_CATEGORIES}},
+            "required": ["new_category"]
+        }
+    }},
 ]
 
 
@@ -489,6 +525,10 @@ def execute_tool(tool_name: str, args: dict, user_id: str) -> str:
             return add_transaction(user_id=user_id, **args)
         elif tool_name == "query_transactions":
             return query_transactions(user_id=user_id, period=args.get("period", "this_month"), category=args.get("category"))
+        elif tool_name == "delete_last_transaction":
+            return delete_last_transaction(user_id)
+        elif tool_name == "correct_last_transaction_category":
+            return correct_last_transaction_category(user_id, args.get("new_category"))
         elif tool_name == "set_budget":
             return set_budget(user_id, args["category"], args["monthly_limit"])
         elif tool_name == "check_budget_status":
@@ -526,6 +566,14 @@ CHAT_SYSTEM_PROMPT = (
     "When the user asks about their spending, or asks you to list/show/detail "
     "their recent transactions, use query_transactions - it already returns an "
     "itemized breakdown grouped by category, so just relay it clearly. "
+    "CRITICAL: always call query_transactions freshly for every spending question, "
+    "even if you answered a similar question earlier in this same conversation. "
+    "Never reuse or estimate numbers from earlier in the chat history - the data "
+    "can change at any time (new transactions, /undo, /fix corrections), and 'today' "
+    "itself changes, so a stale answer is actively wrong, not just imprecise. "
+    "When the user asks to undo, delete, or remove the last thing they logged, use "
+    "delete_last_transaction. When they ask to fix or change the category of the "
+    "last thing they logged, use correct_last_transaction_category. "
     "Always confirm what you recorded in a short, clear sentence."
     + "\n\n" + EGYPTIAN_BANK_SMS_EXAMPLES
 )
