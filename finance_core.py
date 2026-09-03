@@ -83,20 +83,28 @@ DUPLICATE_WINDOW_MINUTES = 60
 
 
 def _is_likely_duplicate(user_id: str, amount: float, party: str, type: str) -> bool:
-    """Guards against the same SMS being forwarded twice. Deliberately
-    ignores 'party' for matching - the AI's extraction of the merchant/
-    sender name can vary slightly between retries of the same message
-    (e.g. 'X' vs 'X جماعة'), so requiring an exact party match let real
-    duplicates slip through. Same amount + same direction within the
-    window is treated as the same real-world transaction."""
+    """Guards against the same SMS being forwarded twice, without the
+    false-positive risk of blocking two genuinely different people who
+    happen to send the same amount. Same amount + same direction within
+    the window, AND the party names are similar (one contains the
+    other, e.g. 'X' vs 'X جماعة' from the AI extracting a retry
+    slightly differently) - not just any two unrelated names."""
     cutoff = (datetime.utcnow() - timedelta(minutes=DUPLICATE_WINDOW_MINUTES)).isoformat()
-    rows = supabase.table("transactions").select("id") \
+    rows = supabase.table("transactions").select("id, party") \
         .eq("user_id", user_id) \
         .eq("amount", amount) \
         .eq("type", type) \
         .gte("created_at", cutoff) \
         .execute().data
-    return len(rows) > 0
+
+    party_norm = (party or "").strip().lower()
+    for r in rows:
+        existing_norm = (r.get("party") or "").strip().lower()
+        if not party_norm and not existing_norm:
+            return True  # both missing a party (e.g. ATM withdrawals) - treat as duplicate
+        if party_norm and existing_norm and (party_norm in existing_norm or existing_norm in party_norm):
+            return True
+    return False
 
 
 def add_transaction(user_id: str, amount: float, category: str, type: str,
