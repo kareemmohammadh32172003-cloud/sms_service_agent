@@ -79,23 +79,24 @@ def list_all_users() -> list[dict]:
 # Tools - same signatures as before, all scoped by user_id
 # =================================================================
 
-DUPLICATE_WINDOW_MINUTES = 10
+DUPLICATE_WINDOW_MINUTES = 60
 
 
-def _is_likely_duplicate(user_id: str, raw_text: str, amount: float) -> bool:
+def _is_likely_duplicate(user_id: str, amount: float, party: str, type: str) -> bool:
     """Guards against the same SMS being forwarded twice (some SMS
-    Forwarder apps retry on flaky connections). Same user, same raw
-    text, same amount, within a short time window = duplicate."""
-    if not raw_text:
-        return False
-
+    Forwarder apps retry with slightly reformatted text on flaky
+    connections, so we deliberately don't compare raw_text exactly -
+    same amount + same party + same direction within an hour is
+    treated as the same real-world transaction)."""
     cutoff = (datetime.utcnow() - timedelta(minutes=DUPLICATE_WINDOW_MINUTES)).isoformat()
-    rows = supabase.table("transactions").select("id") \
+    query = supabase.table("transactions").select("id") \
         .eq("user_id", user_id) \
-        .eq("raw_text", raw_text) \
         .eq("amount", amount) \
-        .gte("created_at", cutoff) \
-        .execute().data
+        .eq("type", type) \
+        .gte("created_at", cutoff)
+    if party:
+        query = query.eq("party", party)
+    rows = query.execute().data
     return len(rows) > 0
 
 
@@ -106,8 +107,8 @@ def add_transaction(user_id: str, amount: float, category: str, type: str,
     if type not in ("expense", "income"):
         return f"Error: type must be 'expense' or 'income', got '{type}'"
 
-    if _is_likely_duplicate(user_id, raw_text, amount):
-        return "Skipped: this looks like a duplicate of a transaction recorded a few minutes ago."
+    if _is_likely_duplicate(user_id, amount, party, type):
+        return "Skipped: this looks like a duplicate of a transaction recorded recently."
 
     txn_date = txn_date or date.today().isoformat()
 
