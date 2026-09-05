@@ -205,6 +205,8 @@ def query_transactions(user_id: str, period: str = "this_month", category: str =
         query = query.gte("txn_date", f"{now.strftime('%Y-%m')}-01")
     elif period == "today":
         query = query.eq("txn_date", date.today().isoformat())
+    elif period == "yesterday":
+        query = query.eq("txn_date", (date.today() - timedelta(days=1)).isoformat())
     elif period == "last_month":
         last_month = now.month - 1 or 12
         year = now.year if now.month > 1 else now.year - 1
@@ -255,6 +257,8 @@ def get_expense_category_totals(user_id: str, period: str = "this_month") -> dic
         query = query.gte("txn_date", f"{now.strftime('%Y-%m')}-01")
     elif period == "today":
         query = query.eq("txn_date", date.today().isoformat())
+    elif period == "yesterday":
+        query = query.eq("txn_date", (date.today() - timedelta(days=1)).isoformat())
     elif period == "last_month":
         last_month = now.month - 1 or 12
         year = now.year if now.month > 1 else now.year - 1
@@ -470,7 +474,7 @@ TOOLS_SCHEMA = [
         "parameters": {
             "type": "object",
             "properties": {
-                "period": {"type": "string", "enum": ["today", "this_month", "last_month", "all"]},
+                "period": {"type": "string", "enum": ["today", "yesterday", "this_month", "last_month", "all"]},
                 "category": {"type": "string", "enum": VALID_CATEGORIES},
             },
             "required": ["period"]

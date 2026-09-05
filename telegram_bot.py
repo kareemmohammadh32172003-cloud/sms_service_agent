@@ -73,7 +73,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"أو ممكن كمان تلصق أي رسالة SMS هنا مباشرة وأنا هسجلها.\n\n"
         f"وكمان تقدر تقولي بصوتك أو بكلامك العادي على أي مصروف كاش (زي "
         f"'دفعت 50 جنيه تاكسي')، مش لازم يكون رسالة بنك رسمية.\n\n"
-        f"الأوامر المتاحة: /today  /month  /lastmonth  /budgetstatus  /fix  /chart  /undo  /subscriptions  /projection"
+        f"الأوامر المتاحة: /today  /yesterday  /month  /lastmonth  /budgetstatus  /fix  /chart  /undo  /subscriptions  /projection"
     )
 
 
@@ -83,6 +83,15 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(NOT_REGISTERED_MSG)
         return
     result = core.query_transactions(user["id"], period="today")
+    await update.message.reply_text(result)
+
+
+async def yesterday(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = core.get_registered_user(update.effective_chat.id)
+    if not user:
+        await update.message.reply_text(NOT_REGISTERED_MSG)
+        return
+    result = core.query_transactions(user["id"], period="yesterday")
     await update.message.reply_text(result)
 
 
@@ -255,6 +264,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("today", today))
+    app.add_handler(CommandHandler("yesterday", yesterday))
     app.add_handler(CommandHandler("month", month))
     app.add_handler(CommandHandler("lastmonth", lastmonth))
     app.add_handler(CommandHandler("budget", budget))
