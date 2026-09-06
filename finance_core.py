@@ -172,9 +172,11 @@ def list_account_balances(user_id: str) -> str:
     return "أرصدتك الحالية:\n" + "\n".join(lines) + f"\n\nالإجمالي: {total:.2f} جنيه"
 
 
+
+
 def add_transaction(user_id: str, amount: float, category: str, type: str,
                      party: str = "", raw_text: str = "", txn_date: str = None,
-                     account: str = "") -> str:
+                     account: str = "", balance_after: float = None) -> str:
     if category not in VALID_CATEGORIES:
         category = "other"
     if type not in ("expense", "income"):
@@ -197,12 +199,21 @@ def add_transaction(user_id: str, amount: float, category: str, type: str,
         "account": account_name,
     }).execute()
 
-    delta = amount if type == "income" else -amount
-    new_balance = adjust_account_balance(user_id, account_name, delta)
+    if balance_after is not None:
+        # The SMS itself stated the resulting balance - trust that over our
+        # own running total, since it self-corrects any past drift (a missed
+        # or mis-parsed transaction won't compound into a wrong balance forever).
+        set_account_balance(user_id, account_name, balance_after)
+        new_balance = balance_after
+        source_note = " - synced from SMS"
+    else:
+        delta = amount if type == "income" else -amount
+        new_balance = adjust_account_balance(user_id, account_name, delta)
+        source_note = ""
 
     sign = "-" if type == "expense" else "+"
     return (f"Recorded: {sign}{amount} EGP | {category} | {party or 'N/A'} | "
-            f"Account: {account_name} (new balance: {new_balance:.2f} EGP)")
+            f"Account: {account_name} (new balance: {new_balance:.2f} EGP{source_note})")
 
 
 def get_last_transaction(user_id: str) -> dict | None:
@@ -491,8 +502,9 @@ IMPORTANT: every example below now also extracts 'account' - the user's OWN
 bank/wallet the money moved through - separately from 'party' (the other
 side of the transaction). Never confuse the two.
 
-1. "تم خصم مبلغ 250.00 جنيه من حسابك في بنك مصر رقم *1234 لصالح كارفور بتاريخ 01-09-2026"
-   -> type=expense, amount=250.00, party="كارفور", account="بنك مصر", category=food or shopping
+1. "تم خصم مبلغ 250.00 جنيه من حسابك في بنك مصر رقم *1234 لصالح كارفور، رصيدك الحالي 1750.00 جنيه"
+   -> type=expense, amount=250.00, party="كارفور", account="بنك مصر", category=food or shopping, balance_after=1750.00
+   (the SMS explicitly stated the resulting balance - always extract it when present)
 
 2. "تم سحب مبلغ 1000.00 جنيه من رصيدك في البنك الأهلي عن طريق ماكينة الصراف الآلي ATM"
    -> type=expense, amount=1000.00, party="ATM withdrawal", account="البنك الأهلي", category=other
@@ -553,6 +565,12 @@ TOOLS_SCHEMA = [
                             "the money moved through, e.g. 'بنك مصر', 'CIB', 'فودافون كاش', 'أورانج موني', "
                             "'انستاباي', or 'كاش' for manually logged cash spending. This is different from "
                             "'party' - it's the user's own account, not the other side of the transaction."},
+                "balance_after": {"type": "number", "description": "The account's resulting balance, "
+                                  "ONLY if the SMS explicitly states it (e.g. 'رصيدك الحالي 1750 جنيه', "
+                                  "'رصيدك المتبقي: 500'). This is the ground truth from the bank itself, "
+                                  "so extract it whenever present - it keeps the tracked balance accurate "
+                                  "even if a past transaction was missed. Leave blank if not mentioned - "
+                                  "never calculate or guess this yourself."},
                 "raw_text": {"type": "string"},
             },
             "required": ["amount", "category", "type"]
@@ -782,7 +800,16 @@ WEBHOOK_SYSTEM_PROMPT = (
     "Also extract 'account' - which of the user's own bank cards or wallets the "
     "money moved through (e.g. 'بنك مصر', 'فودافون كاش', 'انستاباي') - separate "
     "from 'party' (the merchant/other side). If the SMS doesn't mention which "
-    "bank/wallet, leave account blank rather than guessing."
+    "bank/wallet, leave account blank rather than guessing. Also extract "
+    "'balance_after' whenever the SMS explicitly states the resulting balance "
+    "(e.g. 'رصيدك الحالي X', 'رصيدك المتبقي X') - never calculate this yourself, "
+    "only extract it if literally stated.\n\n"
+    "SCAM AWARENESS: genuine bank/wallet transaction SMS simply states a fact "
+    "(amount, direction, sometimes balance) - it never asks the user to call a "
+    "number, click a link, share an OTP, or 'confirm' anything. If the message "
+    "combines a transaction claim with an urgent call-to-action like that, still "
+    "record what it claims (so the user sees it and can judge for themselves) but "
+    "this pattern is a strong scam indicator worth being extra careful about."
     + "\n\n" + EGYPTIAN_BANK_SMS_EXAMPLES
 )
 
