@@ -118,8 +118,63 @@ def _is_likely_duplicate(user_id: str, raw_text: str, amount: float, type: str) 
     return len(rows) > 0
 
 
+# =================================================================
+# Account balances - tracks a running balance per bank card/wallet
+# (e.g. "بنك مصر", "فودافون كاش", "انستاباي", "كاش") so the user can
+# ask "كام جالي في X" or "رصيدي كام في X" at any time.
+# =================================================================
+
+DEFAULT_ACCOUNT_NAME = "غير محدد"
+
+
+def get_or_create_account(user_id: str, account_name: str) -> dict:
+    account_name = (account_name or "").strip() or DEFAULT_ACCOUNT_NAME
+    existing = supabase.table("accounts").select("*") \
+        .eq("user_id", user_id).eq("name", account_name).execute().data
+    if existing:
+        return existing[0]
+    row = supabase.table("accounts").insert({
+        "user_id": user_id, "name": account_name, "balance": 0,
+    }).execute().data
+    return row[0]
+
+
+def adjust_account_balance(user_id: str, account_name: str, delta: float) -> float:
+    account = get_or_create_account(user_id, account_name)
+    new_balance = account["balance"] + delta
+    supabase.table("accounts").update({"balance": new_balance}).eq("id", account["id"]).execute()
+    return new_balance
+
+
+def set_account_balance(user_id: str, account_name: str, balance: float) -> str:
+    account_name = (account_name or "").strip() or DEFAULT_ACCOUNT_NAME
+    account = get_or_create_account(user_id, account_name)
+    supabase.table("accounts").update({"balance": balance}).eq("id", account["id"]).execute()
+    return f"تم ضبط رصيد '{account_name}' على {balance:.2f} جنيه."
+
+
+def get_account_balance(user_id: str, account_name: str) -> str:
+    account_name = (account_name or "").strip()
+    rows = supabase.table("accounts").select("*") \
+        .eq("user_id", user_id).eq("name", account_name).execute().data
+    if not rows:
+        return f"مفيش رصيد متسجل لحساب '{account_name}' لسه."
+    return f"{account_name}: {rows[0]['balance']:.2f} جنيه"
+
+
+def list_account_balances(user_id: str) -> str:
+    rows = supabase.table("accounts").select("*").eq("user_id", user_id).execute().data
+    if not rows:
+        return "لسه معندكش أي حسابات متسجلة. أول معاملة تتسجل، الحساب بتاعها بيتعمل أوتوماتيك."
+    rows.sort(key=lambda r: -r["balance"])
+    lines = [f"  • {r['name']}: {r['balance']:.2f} جنيه" for r in rows]
+    total = sum(r["balance"] for r in rows)
+    return "أرصدتك الحالية:\n" + "\n".join(lines) + f"\n\nالإجمالي: {total:.2f} جنيه"
+
+
 def add_transaction(user_id: str, amount: float, category: str, type: str,
-                     party: str = "", raw_text: str = "", txn_date: str = None) -> str:
+                     party: str = "", raw_text: str = "", txn_date: str = None,
+                     account: str = "") -> str:
     if category not in VALID_CATEGORIES:
         category = "other"
     if type not in ("expense", "income"):
@@ -129,6 +184,7 @@ def add_transaction(user_id: str, amount: float, category: str, type: str,
         return "Skipped: this looks like a duplicate of a transaction recorded recently."
 
     txn_date = txn_date or date.today().isoformat()
+    account_name = (account or "").strip() or DEFAULT_ACCOUNT_NAME
 
     supabase.table("transactions").insert({
         "user_id": user_id,
@@ -138,10 +194,15 @@ def add_transaction(user_id: str, amount: float, category: str, type: str,
         "category": category,
         "type": type,
         "raw_text": raw_text,
+        "account": account_name,
     }).execute()
 
+    delta = amount if type == "income" else -amount
+    new_balance = adjust_account_balance(user_id, account_name, delta)
+
     sign = "-" if type == "expense" else "+"
-    return f"Recorded: {sign}{amount} EGP | {category} | {party or 'N/A'}"
+    return (f"Recorded: {sign}{amount} EGP | {category} | {party or 'N/A'} | "
+            f"Account: {account_name} (new balance: {new_balance:.2f} EGP)")
 
 
 def get_last_transaction(user_id: str) -> dict | None:
@@ -192,11 +253,16 @@ def delete_last_transaction(user_id: str) -> str:
 
     supabase.table("transactions").delete().eq("id", last["id"]).execute()
 
+    account_name = last.get("account") or DEFAULT_ACCOUNT_NAME
+    reversal = -last["amount"] if last["type"] == "income" else last["amount"]
+    new_balance = adjust_account_balance(user_id, account_name, reversal)
+
     sign = "-" if last["type"] == "expense" else "+"
-    return f"Deleted: {sign}{last['amount']} EGP | {last['category']} | {last['party'] or 'N/A'}"
+    return (f"Deleted: {sign}{last['amount']} EGP | {last['category']} | {last['party'] or 'N/A'} | "
+            f"Account: {account_name} (balance reverted to {new_balance:.2f} EGP)")
 
 
-def query_transactions(user_id: str, period: str = "this_month", category: str = None) -> str:
+def query_transactions(user_id: str, period: str = "this_month", category: str = None, account: str = None) -> str:
     now = datetime.now()
 
     query = supabase.table("transactions").select("*").eq("user_id", user_id)
@@ -215,11 +281,19 @@ def query_transactions(user_id: str, period: str = "this_month", category: str =
 
     if category:
         query = query.eq("category", category)
+    if account:
+        query = query.eq("account", account)
 
     rows = query.execute().data
 
     if not rows:
-        return f"No transactions found for period '{period}'" + (f" in category '{category}'" if category else "")
+        filters = []
+        if category:
+            filters.append(f"category '{category}'")
+        if account:
+            filters.append(f"account '{account}'")
+        suffix = f" ({', '.join(filters)})" if filters else ""
+        return f"No transactions found for period '{period}'{suffix}"
 
     # Group individual transactions under their category, so the
     # user sees each item (party, amount) not just a category total.
@@ -413,36 +487,47 @@ EGYPTIAN_BANK_SMS_EXAMPLES = """
 Real-world examples of Egyptian bank/wallet SMS formats and how to read them
 (the exact wording varies by provider, but these patterns are common):
 
-1. "تم خصم مبلغ 250.00 جنيه من حسابك رقم *1234 لصالح كارفور بتاريخ 01-09-2026"
-   -> type=expense, amount=250.00, party="كارفور", category=food or shopping
+IMPORTANT: every example below now also extracts 'account' - the user's OWN
+bank/wallet the money moved through - separately from 'party' (the other
+side of the transaction). Never confuse the two.
 
-2. "تم سحب مبلغ 1000.00 جنيه من رصيدك عن طريق ماكينة الصراف الآلي ATM"
-   -> type=expense, amount=1000.00, party="ATM withdrawal", category=other
+1. "تم خصم مبلغ 250.00 جنيه من حسابك في بنك مصر رقم *1234 لصالح كارفور بتاريخ 01-09-2026"
+   -> type=expense, amount=250.00, party="كارفور", account="بنك مصر", category=food or shopping
+
+2. "تم سحب مبلغ 1000.00 جنيه من رصيدك في البنك الأهلي عن طريق ماكينة الصراف الآلي ATM"
+   -> type=expense, amount=1000.00, party="ATM withdrawal", account="البنك الأهلي", category=other
    (a raw cash withdrawal - the money left the account, but there's no
    merchant, so don't guess a spending category; use 'other')
 
-3. "تم إيداع مبلغ 15000.00 جنيه في حسابك - مرتب شهر أغسطس"
-   -> type=income, amount=15000.00, party="راتب", category=salary
+3. "تم إيداع مبلغ 15000.00 جنيه في حسابك ببنك CIB - مرتب شهر أغسطس"
+   -> type=income, amount=15000.00, party="راتب", account="CIB", category=salary
 
 4. "تم تحويل مبلغ 500.00 جنيه من حسابك عبر انستاباي InstaPay إلى محمد أحمد"
-   -> type=expense, amount=500.00, party="محمد أحمد", category=transfer
+   -> type=expense, amount=500.00, party="محمد أحمد", account="انستاباي", category=transfer
    (InstaPay/mobile transfers OUT of the account are an expense of type 'transfer')
 
 5. "تم استلام تحويل بمبلغ 300.00 جنيه من InstaPay من سارة علي"
-   -> type=income, amount=300.00, party="سارة علي", category=transfer
+   -> type=income, amount=300.00, party="سارة علي", account="انستاباي", category=transfer
 
 6. "تم خصم 100.00 جنيه من محفظة فودافون كاش الخاصة بك لصالح شحن رصيد"
-   -> type=expense, amount=100.00, party="شحن رصيد", category=bills
+   -> type=expense, amount=100.00, party="شحن رصيد", account="فودافون كاش", category=bills
 
 7. "تم إضافة رصيد بمبلغ 200.00 جنيه إلى محفظة أورانج موني الخاصة بك"
-   -> type=income, amount=200.00, party="أورانج موني", category=transfer
+   -> type=income, amount=200.00, party="أورانج موني", account="أورانج موني", category=transfer
 
 8. "عزيزنا العميل، تم خصم 89.99 جنيه اشتراك شهري - نتفليكس"
-   -> type=expense, amount=89.99, party="نتفليكس", category=entertainment
+   -> type=expense, amount=89.99, party="نتفليكس", account="" (unknown - not mentioned, leave blank), category=entertainment
+
+9. User types plainly (no SMS at all): "دفعت 50 جنيه تاكسي كاش"
+   -> type=expense, amount=50, party="تاكسي", account="كاش", category=transport
+   (any cash spending the user tells you about directly belongs to the "كاش" account)
 
 Key signal words:
   Expense (money leaving): تم خصم, تم سحب, تم تحويل ... إلى/الى, دفعت, اشتراك
   Income (money arriving): تم إيداع, تم استلام, تم إضافة رصيد, راتب/مرتب, تحويل ... من
+
+If the SMS doesn't mention which bank/wallet at all, leave account empty -
+don't guess a specific bank name that wasn't stated.
 
 Not a transaction at all - reply 'not a transaction', do not call add_transaction:
   OTP / verification codes ("رمز التحقق الخاص بك هو..."), promotional offers,
@@ -454,15 +539,20 @@ TOOLS_SCHEMA = [
     {"type": "function", "function": {
         "name": "add_transaction",
         "description": "Records a new financial transaction (expense or income). "
-                        "Extract the amount, category, type, and party from the user's message "
-                        "(which is often a raw bank/wallet SMS notification).",
+                        "Extract the amount, category, type, party, and account from the user's "
+                        "message (which is often a raw bank/wallet SMS notification).",
         "parameters": {
             "type": "object",
             "properties": {
                 "amount": {"type": "number"},
                 "category": {"type": "string", "enum": VALID_CATEGORIES},
                 "type": {"type": "string", "enum": ["expense", "income"]},
-                "party": {"type": "string"},
+                "party": {"type": "string", "description": "The other side of the transaction - the "
+                          "merchant or person the money went to/came from, e.g. 'كارفور', 'محمد أحمد'."},
+                "account": {"type": "string", "description": "Which of the user's OWN accounts/wallets "
+                            "the money moved through, e.g. 'بنك مصر', 'CIB', 'فودافون كاش', 'أورانج موني', "
+                            "'انستاباي', or 'كاش' for manually logged cash spending. This is different from "
+                            "'party' - it's the user's own account, not the other side of the transaction."},
                 "raw_text": {"type": "string"},
             },
             "required": ["amount", "category", "type"]
@@ -470,12 +560,14 @@ TOOLS_SCHEMA = [
     }},
     {"type": "function", "function": {
         "name": "query_transactions",
-        "description": "Retrieves a summary of transactions for a time period, optionally filtered by category.",
+        "description": "Retrieves an itemized summary of transactions for a time period, optionally "
+                        "filtered by category and/or account (e.g. 'كام جالي في بنك مصر النهارده').",
         "parameters": {
             "type": "object",
             "properties": {
                 "period": {"type": "string", "enum": ["today", "yesterday", "this_month", "last_month", "all"]},
                 "category": {"type": "string", "enum": VALID_CATEGORIES},
+                "account": {"type": "string", "description": "Filter to only this account/wallet, e.g. 'بنك مصر' or 'فودافون كاش'."},
             },
             "required": ["period"]
         }
@@ -516,6 +608,29 @@ TOOLS_SCHEMA = [
             "required": ["new_category"]
         }
     }},
+    {"type": "function", "function": {
+        "name": "check_account_balance",
+        "description": "Shows the current tracked balance for one account/wallet (e.g. 'رصيدي كام "
+                        "في فودافون كاش'), or all accounts at once if none is specified (e.g. 'قولي أرصدتي').",
+        "parameters": {
+            "type": "object",
+            "properties": {"account": {"type": "string", "description": "Optional - omit to see all account balances."}},
+        }
+    }},
+    {"type": "function", "function": {
+        "name": "set_account_balance",
+        "description": "Sets the exact current balance for one of the user's accounts/wallets. Use "
+                        "this when the user tells you their actual real-world balance to start tracking "
+                        "from, e.g. 'رصيدي في بنك مصر دلوقتي 2000 جنيه'.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "account": {"type": "string"},
+                "balance": {"type": "number"},
+            },
+            "required": ["account", "balance"]
+        }
+    }},
 ]
 
 
@@ -528,7 +643,13 @@ def execute_tool(tool_name: str, args: dict, user_id: str) -> str:
             args.pop("user_id", None)
             return add_transaction(user_id=user_id, **args)
         elif tool_name == "query_transactions":
-            return query_transactions(user_id=user_id, period=args.get("period", "this_month"), category=args.get("category"))
+            return query_transactions(user_id=user_id, period=args.get("period", "this_month"),
+                                       category=args.get("category"), account=args.get("account"))
+        elif tool_name == "check_account_balance":
+            acct = args.get("account")
+            return get_account_balance(user_id, acct) if acct else list_account_balances(user_id)
+        elif tool_name == "set_account_balance":
+            return set_account_balance(user_id, args["account"], args["balance"])
         elif tool_name == "delete_last_transaction":
             return delete_last_transaction(user_id)
         elif tool_name == "correct_last_transaction_category":
@@ -578,6 +699,15 @@ CHAT_SYSTEM_PROMPT = (
     "When the user asks to undo, delete, or remove the last thing they logged, use "
     "delete_last_transaction. When they ask to fix or change the category of the "
     "last thing they logged, use correct_last_transaction_category. "
+    "ACCOUNTS: always try to extract 'account' too - which of the user's own bank "
+    "cards or wallets the money moved through (e.g. 'بنك مصر', 'فودافون كاش', "
+    "'انستاباي'), separate from 'party' (the merchant/other side). For manually "
+    "typed or spoken cash spending, use account='كاش'. When the user asks about a "
+    "balance (e.g. 'رصيدي كام في فودافون كاش', 'قولي أرصدتي') use check_account_balance. "
+    "When they tell you their real current balance for an account (e.g. 'رصيدي في "
+    "بنك مصر دلوقتي 2000 جنيه'), use set_account_balance to record that starting point. "
+    "When they ask how much came into or out of a specific account (e.g. 'كام جالي "
+    "في بنك مصر النهارده'), pass that account as a filter to query_transactions. "
     "Always confirm what you recorded in a short, clear sentence."
     + "\n\n" + EGYPTIAN_BANK_SMS_EXAMPLES
 )
@@ -648,7 +778,11 @@ WEBHOOK_SYSTEM_PROMPT = (
     "دفعت, خصم من حسابك).\n"
     "When genuinely ambiguous, prefer 'expense' only if there is a debit-like verb; "
     "otherwise still record your best guess rather than skipping it - never leave "
-    "a real transaction unrecorded just because you're unsure of the category."
+    "a real transaction unrecorded just because you're unsure of the category. "
+    "Also extract 'account' - which of the user's own bank cards or wallets the "
+    "money moved through (e.g. 'بنك مصر', 'فودافون كاش', 'انستاباي') - separate "
+    "from 'party' (the merchant/other side). If the SMS doesn't mention which "
+    "bank/wallet, leave account blank rather than guessing."
     + "\n\n" + EGYPTIAN_BANK_SMS_EXAMPLES
 )
 

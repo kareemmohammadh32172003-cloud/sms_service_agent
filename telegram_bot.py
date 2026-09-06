@@ -73,7 +73,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"أو ممكن كمان تلصق أي رسالة SMS هنا مباشرة وأنا هسجلها.\n\n"
         f"وكمان تقدر تقولي بصوتك أو بكلامك العادي على أي مصروف كاش (زي "
         f"'دفعت 50 جنيه تاكسي')، مش لازم يكون رسالة بنك رسمية.\n\n"
-        f"الأوامر المتاحة: /today  /yesterday  /month  /lastmonth  /budgetstatus  /fix  /chart  /undo  /subscriptions  /projection"
+        f"الأوامر المتاحة: /today  /yesterday  /month  /lastmonth  /budgetstatus  /fix  /chart  /undo  /subscriptions  /projection  /balance  /setbalance"
     )
 
 
@@ -162,6 +162,40 @@ async def undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(NOT_REGISTERED_MSG)
         return
     result = core.delete_last_transaction(user["id"])
+    await update.message.reply_text(result)
+
+
+async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = core.get_registered_user(update.effective_chat.id)
+    if not user:
+        await update.message.reply_text(NOT_REGISTERED_MSG)
+        return
+    if context.args:
+        account_name = " ".join(context.args)
+        result = core.get_account_balance(user["id"], account_name)
+    else:
+        result = core.list_account_balances(user["id"])
+    await update.message.reply_text(result)
+
+
+async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = core.get_registered_user(update.effective_chat.id)
+    if not user:
+        await update.message.reply_text(NOT_REGISTERED_MSG)
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "استخدم الصيغة: /setbalance بنك مصر 2000\n"
+            "(اسم الحساب، مسافة، وبعدين الرصيد الحالي)"
+        )
+        return
+    try:
+        amount = float(context.args[-1])
+    except ValueError:
+        await update.message.reply_text("آخر كلمة لازم تكون رقم (الرصيد).")
+        return
+    account_name = " ".join(context.args[:-1])
+    result = core.set_account_balance(user["id"], account_name, amount)
     await update.message.reply_text(result)
 
 
@@ -271,6 +305,8 @@ def main():
     app.add_handler(CommandHandler("budgetstatus", budget_status))
     app.add_handler(CommandHandler("fix", fix))
     app.add_handler(CommandHandler("undo", undo))
+    app.add_handler(CommandHandler("balance", balance))
+    app.add_handler(CommandHandler("setbalance", set_balance))
     app.add_handler(CommandHandler("subscriptions", subscriptions))
     app.add_handler(CommandHandler("projection", projection))
     app.add_handler(CommandHandler("chart", chart))
