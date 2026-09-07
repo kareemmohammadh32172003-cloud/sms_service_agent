@@ -260,7 +260,21 @@ async def handle_raw_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     chat_id = update.effective_chat.id
     history = _conversation_histories.setdefault(chat_id, [])
 
-    result = core.run_finance_agent(update.message.text, history, user_id=user["id"])
+    try:
+        result = core.run_finance_agent(update.message.text, history, user_id=user["id"])
+    except Exception as e:
+        # Never fail silently - a crash here used to mean no reply at
+        # all, which just looks like the bot is broken. Also drop the
+        # broken conversation history so the next message starts clean
+        # instead of hitting the exact same error forever.
+        _conversation_histories[chat_id] = []
+        await update.message.reply_text(
+            "حصلت مشكلة وأنا بحاول أرد عليك، وبدأت المحادثة من جديد عشان معتقفش تاني. "
+            "جرب تسأل تاني، ولو استمرت المشكلة قول لمطوّر البوت."
+        )
+        print(f"handle_raw_message error for chat {chat_id}: {e}")
+        return
+
     await update.message.reply_text(result)
 
 
@@ -289,7 +303,17 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     history = _conversation_histories.setdefault(chat_id, [])
-    result = core.run_finance_agent(transcribed_text, history, user_id=user["id"])
+    try:
+        result = core.run_finance_agent(transcribed_text, history, user_id=user["id"])
+    except Exception as e:
+        _conversation_histories[chat_id] = []
+        await update.message.reply_text(
+            "حصلت مشكلة وأنا بحاول أرد عليك، وبدأت المحادثة من جديد عشان معتقفش تاني. "
+            "جرب تسأل تاني، ولو استمرت المشكلة قول لمطوّر البوت."
+        )
+        print(f"handle_voice error for chat {chat_id}: {e}")
+        return
+
     await update.message.reply_text(f"🎤 سمعت: \"{transcribed_text}\"\n\n{result}")
 
 

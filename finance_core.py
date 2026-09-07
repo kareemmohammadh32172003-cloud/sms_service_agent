@@ -815,7 +815,25 @@ def run_finance_agent(user_message: str, history: list, user_id: str, log_callba
             model=MODEL_NAME, messages=history, tools=TOOLS_SCHEMA, max_tokens=600,
         )
         message = response.choices[0].message
-        history.append(message)
+
+        # IMPORTANT: store a plain dict, not the raw SDK message object.
+        # Appending the object itself works for the very first follow-up
+        # call, but breaks on later turns once this history is reused
+        # across multiple separate messages (as it is here, persisted
+        # per Telegram chat) - the API rejects the malformed replay and
+        # raises an exception, which without a try/except higher up
+        # means the bot goes completely silent with no reply at all.
+        assistant_entry = {"role": "assistant", "content": message.content}
+        if message.tool_calls:
+            assistant_entry["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                }
+                for tc in message.tool_calls
+            ]
+        history.append(assistant_entry)
 
         if message.tool_calls:
             for tool_call in message.tool_calls:
