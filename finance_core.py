@@ -126,9 +126,42 @@ def _is_likely_duplicate(user_id: str, raw_text: str, amount: float, type: str) 
 
 DEFAULT_ACCOUNT_NAME = "غير محدد"
 
+# Maps known spelling/language variants of the same real-world account
+# to one canonical name, so "فودافون كاش", "Vodafone Cash", and
+# "vodafone-cash" all end up as the exact same account instead of
+# silently becoming separate accounts with split balances.
+ACCOUNT_ALIASES = {
+    "فودافون كاش": ["فودافون كاش", "فودافون كاش مصر", "vodafone cash", "vodafone-cash", "vf cash", "فودافون"],
+    "أورانج موني": ["أورانج موني", "أورانج كاش", "orange money", "orange cash", "orange"],
+    "اتصالات كاش": ["اتصالات كاش", "etisalat cash", "e& cash", "etisalat"],
+    "انستاباي": ["انستاباي", "انستا باي", "instapay", "insta pay"],
+    "بنك مصر": ["بنك مصر", "banque misr", "bank misr", "bm"],
+    "البنك الأهلي": ["البنك الأهلي", "البنك الاهلي", "nbe", "national bank of egypt"],
+    "بنك CIB": ["بنك cib", "cib", "commercial international bank"],
+    "بنك QNB": ["بنك qnb", "qnb"],
+    "كاش": ["كاش", "نقدي", "cash"],
+}
+
+
+def normalize_account_name(account_name: str) -> str:
+    """Collapses spelling/language variants of the same account into
+    one canonical name (case-insensitive). Falls back to the original
+    text, stripped, if it doesn't match any known alias - so a new
+    bank/wallet the user hasn't used before still gets its own account
+    rather than being forced into an existing bucket."""
+    name = (account_name or "").strip()
+    if not name:
+        return DEFAULT_ACCOUNT_NAME
+
+    name_lower = name.lower()
+    for canonical, aliases in ACCOUNT_ALIASES.items():
+        if name_lower in (a.lower() for a in aliases):
+            return canonical
+    return name
+
 
 def get_or_create_account(user_id: str, account_name: str) -> dict:
-    account_name = (account_name or "").strip() or DEFAULT_ACCOUNT_NAME
+    account_name = normalize_account_name(account_name)
     existing = supabase.table("accounts").select("*") \
         .eq("user_id", user_id).eq("name", account_name).execute().data
     if existing:
@@ -147,14 +180,14 @@ def adjust_account_balance(user_id: str, account_name: str, delta: float) -> flo
 
 
 def set_account_balance(user_id: str, account_name: str, balance: float) -> str:
-    account_name = (account_name or "").strip() or DEFAULT_ACCOUNT_NAME
+    account_name = normalize_account_name(account_name)
     account = get_or_create_account(user_id, account_name)
     supabase.table("accounts").update({"balance": balance}).eq("id", account["id"]).execute()
     return f"تم ضبط رصيد '{account_name}' على {balance:.2f} جنيه."
 
 
 def get_account_balance(user_id: str, account_name: str) -> str:
-    account_name = (account_name or "").strip()
+    account_name = normalize_account_name(account_name)
     rows = supabase.table("accounts").select("*") \
         .eq("user_id", user_id).eq("name", account_name).execute().data
     if not rows:
@@ -186,7 +219,7 @@ def add_transaction(user_id: str, amount: float, category: str, type: str,
         return "Skipped: this looks like a duplicate of a transaction recorded recently."
 
     txn_date = txn_date or date.today().isoformat()
-    account_name = (account or "").strip() or DEFAULT_ACCOUNT_NAME
+    account_name = normalize_account_name(account)
 
     supabase.table("transactions").insert({
         "user_id": user_id,
@@ -293,6 +326,7 @@ def query_transactions(user_id: str, period: str = "this_month", category: str =
     if category:
         query = query.eq("category", category)
     if account:
+        account = normalize_account_name(account)
         query = query.eq("account", account)
 
     rows = query.execute().data
