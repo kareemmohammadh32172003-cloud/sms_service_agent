@@ -143,20 +143,42 @@ ACCOUNT_ALIASES = {
 }
 
 
+def _clean_for_comparison(text: str) -> str:
+    """Strips punctuation/separator differences (VF-Cash vs VF Cash vs
+    vf_cash) so they compare as identical, without touching the actual
+    letters - keeps Arabic text completely intact."""
+    text = text.strip().lower()
+    for sep in ("-", "_", ".", "/"):
+        text = text.replace(sep, " ")
+    return " ".join(text.split())  # collapse repeated whitespace
+
+
 def normalize_account_name(account_name: str) -> str:
-    """Collapses spelling/language variants of the same account into
-    one canonical name (case-insensitive). Falls back to the original
-    text, stripped, if it doesn't match any known alias - so a new
-    bank/wallet the user hasn't used before still gets its own account
+    """Collapses spelling/language/punctuation variants of the same
+    account into one canonical name. Falls back to the original text,
+    stripped, if it doesn't match any known alias - so a new bank/
+    wallet the user hasn't used before still gets its own account
     rather than being forced into an existing bucket."""
     name = (account_name or "").strip()
     if not name:
         return DEFAULT_ACCOUNT_NAME
 
-    name_lower = name.lower()
+    name_clean = _clean_for_comparison(name)
+
+    # Pass 1: exact match once separators/case/spacing are normalized.
     for canonical, aliases in ACCOUNT_ALIASES.items():
-        if name_lower in (a.lower() for a in aliases):
+        if name_clean in (_clean_for_comparison(a) for a in aliases):
             return canonical
+
+    # Pass 2: fallback substring containment, for variants not listed
+    # verbatim (e.g. "Vodafone Cash Wallet"). Only applied to aliases
+    # of reasonable length to avoid short strings causing false matches.
+    for canonical, aliases in ACCOUNT_ALIASES.items():
+        for alias in aliases:
+            alias_clean = _clean_for_comparison(alias)
+            if len(alias_clean) >= 4 and (alias_clean in name_clean or name_clean in alias_clean):
+                return canonical
+
     return name
 
 
