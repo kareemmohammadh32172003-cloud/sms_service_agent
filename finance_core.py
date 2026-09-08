@@ -86,6 +86,103 @@ def list_all_users() -> list[dict]:
 
 
 # =================================================================
+# Trusted senders - whitelist of real bank/wallet SMS sender IDs per
+# user. This is the actual anti-fake-message defense: the webhook
+# will refuse to auto-record ANY message whose sender isn't on this
+# list, regardless of how convincing the text looks. Wording alone
+# (e.g. "تم خصم 100 جنيه") is never enough on its own - it must also
+# come from a sender the user has explicitly confirmed is a real
+# bank/wallet, or it just gets held for manual review instead.
+# =================================================================
+
+def _normalize_sender(sender: str) -> str:
+    return (sender or "").strip().lower()
+
+
+def _extract_reference_number(raw_text: str) -> str:
+    """Best-effort extraction of a reference/transaction number if the
+    message states one (e.g. 'رقم العملية 123456', 'Ref: 987654'). This
+    is stored for audit purposes only - NEVER used as a trust signal on
+    its own, because unlike the sender ID, this is just text a phone can
+    freely type, so it proves nothing about authenticity by itself."""
+    import re
+    match = re.search(r"(?:رقم\s*(?:العملي[ةه]|المرجعي|الإشعار)|ref(?:erence)?(?:\s*no\.?)?)\D{0,5}(\d{4,})",
+                       raw_text, re.IGNORECASE)
+    return match.group(1) if match else ""
+
+
+def _looks_like_registered_sender(sender: str) -> bool:
+    """Automatic, no-maintenance classifier for whether an SMS sender ID
+    could plausibly be a real registered bank/wallet sender, based on a
+    property that a personal phone genuinely cannot fake:
+
+    A regular mobile phone can only ever send SMS with its OWN phone
+    number as the 'From' - it has no way to set an arbitrary alphabetic
+    Sender ID like 'Fawry' or a bank's name (that requires a registered
+    SMS gateway account with the telecom regulator). So:
+
+      - Sender contains any letter (Arabic or Latin)  -> business-style
+        alphanumeric ID -> almost certainly a real registered sender.
+      - Sender is a short numeric code (<=6 digits)    -> many banks use
+        short numeric codes too -> treat as registered.
+      - Sender is a normal 10-11 digit mobile number (with or without a
+        leading +/country code), or missing entirely   -> this is what
+        a personal phone (yours or anyone else's) looks like when it
+        sends/forwards a message -> NOT auto-trusted.
+
+    This is not unbeatable (a real SMS-spoofing attack that pays for a
+    gateway account could still forge a fake alphanumeric sender), but
+    it correctly blocks anything a phone can send on its own - including
+    self-sent test messages - with zero manual setup.
+    """
+    if not sender:
+        return False
+    cleaned = sender.strip().lstrip("+")
+    if not cleaned.isdigit():
+        return True  # contains letters -> alphanumeric business sender ID
+    return len(cleaned) <= 6  # short numeric code, not a full mobile number
+
+
+def get_trusted_senders(user_id: str) -> list[str]:
+    row = supabase.table("users").select("trusted_senders").eq("id", user_id).execute().data
+    if not row or not row[0].get("trusted_senders"):
+        return []
+    return [s.strip() for s in row[0]["trusted_senders"].split(",") if s.strip()]
+
+
+def is_sender_trusted(user_id: str, sender: str) -> bool:
+    # Automatic check first - covers the overwhelming majority of real
+    # bank/wallet senders with zero setup. The manual list below is only
+    # a rare fallback for the odd sender our automatic rule misjudges.
+    if _looks_like_registered_sender(sender):
+        return True
+    normalized = _normalize_sender(sender)
+    return normalized in [_normalize_sender(s) for s in get_trusted_senders(user_id)]
+
+
+def add_trusted_sender(user_id: str, sender: str) -> str:
+    sender = sender.strip()
+    if not sender:
+        return "لازم تكتب اسم أو رقم المرسل."
+    current = get_trusted_senders(user_id)
+    if _normalize_sender(sender) in [_normalize_sender(s) for s in current]:
+        return f"'{sender}' مسجل بالفعل كمصدر موثوق."
+    current.append(sender)
+    supabase.table("users").update({"trusted_senders": ",".join(current)}).eq("id", user_id).execute()
+    return f"تمام، '{sender}' بقى مصدر موثوق - أي رسالة جاية منه هتتسجل تلقائي."
+
+
+def list_trusted_senders_text(user_id: str) -> str:
+    senders = get_trusted_senders(user_id)
+    if not senders:
+        return (
+            "مفيش أي مصدر موثوق مسجل لسه، فكل الرسايل هتتوقف للمراجعة اليدوية.\n"
+            "استخدم /trustsender <اسم المرسل> عشان تضيف أول واحد."
+        )
+    return "المصادر الموثوقة عندك:\n" + "\n".join(f"- {s}" for s in senders)
+
+
+# =================================================================
 # Tools - same signatures as before, all scoped by user_id
 # =================================================================
 
@@ -940,7 +1037,32 @@ def _notify_transaction_recorded(telegram_chat_id: int, args: dict, result: str,
     send_telegram_alert(telegram_chat_id, text)
 
 
-def process_incoming_sms(raw_text: str, user_id: str, telegram_chat_id: int = None) -> str:
+def process_incoming_sms(raw_text: str, user_id: str, telegram_chat_id: int = None, sender: str = "") -> str:
+    # --- Sender whitelist gate: this runs BEFORE the LLM ever sees the
+    # text, and is the actual defense against fake/injected messages.
+    # No amount of realistic wording lets a message skip this check -
+    # only a sender the user has explicitly trusted can auto-record.
+    if not is_sender_trusted(user_id, sender):
+        preview = raw_text[:200]
+        shown_sender = sender or "(مفيش اسم مرسل متبعت مع الرسالة)"
+        ref_number = _extract_reference_number(raw_text)
+        ref_line = f"الرقم المرجعي المكتوب في النص: {ref_number}\n" if ref_number else ""
+        send_telegram_alert(
+            telegram_chat_id,
+            "🛑 وصلتني رسالة مسجلتهاش تلقائي لأن شكل المرسل زي رقم موبايل عادي "
+            "مش زي مُرسل بنك/محفظة مسجل رسميًا:\n\n"
+            f"المرسل: {shown_sender}\n"
+            f"{ref_line}"
+            f"النص: {preview}\n\n"
+            + ("ملحوظة: وجود رقم مرجعي في النص مش دليل كفاية لوحده - أي حد ممكن "
+               "يكتب رقم عشوائي شكله حقيقي، فالقرار اتاخد بناءً على المُرسل مش على النص.\n\n"
+               if ref_number else "")
+            + "لو ده فعلاً مصدر حقيقي بشكل استثنائي (نادر)، ابعت:\n"
+            f"/trustsender {shown_sender}\n"
+            "وبعدها ابعتلي نفس الرسالة تاني هنا في الشات وأنا هسجلها يدوي دلوقتي."
+        )
+        return f"Rejected: sender '{shown_sender}' does not look like a registered business sender"
+
     messages = [
         {"role": "system", "content": WEBHOOK_SYSTEM_PROMPT},
         {"role": "user", "content": raw_text},

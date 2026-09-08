@@ -73,7 +73,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"أو ممكن كمان تلصق أي رسالة SMS هنا مباشرة وأنا هسجلها.\n\n"
         f"وكمان تقدر تقولي بصوتك أو بكلامك العادي على أي مصروف كاش (زي "
         f"'دفعت 50 جنيه تاكسي')، مش لازم يكون رسالة بنك رسمية.\n\n"
-        f"الأوامر المتاحة: /today  /yesterday  /month  /lastmonth  /budgetstatus  /fix  /chart  /undo  /subscriptions  /projection  /balance  /setbalance"
+        f"⚠️ مهم: عشان الرسايل تتسجل تلقائي، لازم دلوقتي تظبط تطبيق الـ SMS Forwarder "
+        f"يبعت اسم المرسل كمان مش بس النص - أضف حقل 'sender' في الـ JSON body، مثلاً:\n"
+        f'{{"text": "[sms_body]", "sender": "[sms_number]"}}\n\n'
+        f"وبعد أول رسالة حقيقية توصلك تنبيه بيها، ابعت /trustsender <اسم المرسل> "
+        f"عشان تسجّله كمصدر موثوق (زي Fawry أو اسم بنكك)، والمرة الجاية هتتسجل لوحدها.\n\n"
+        f"الأوامر المتاحة: /today  /yesterday  /month  /lastmonth  /budgetstatus  /fix  /chart  /undo  /subscriptions  /projection  /balance  /setbalance  /trustsender  /senders"
     )
 
 
@@ -196,6 +201,31 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     account_name = " ".join(context.args[:-1])
     result = core.set_account_balance(user["id"], account_name, amount)
+    await update.message.reply_text(result)
+
+
+async def trust_sender(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = core.get_registered_user(update.effective_chat.id)
+    if not user:
+        await update.message.reply_text(NOT_REGISTERED_MSG)
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "استخدم الصيغة: /trustsender Fawry\n"
+            "(اسم أو رقم المرسل بالظبط زي ما ظهرلك في رسالة التنبيه)"
+        )
+        return
+    sender_name = " ".join(context.args)
+    result = core.add_trusted_sender(user["id"], sender_name)
+    await update.message.reply_text(result)
+
+
+async def list_senders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = core.get_registered_user(update.effective_chat.id)
+    if not user:
+        await update.message.reply_text(NOT_REGISTERED_MSG)
+        return
+    result = core.list_trusted_senders_text(user["id"])
     await update.message.reply_text(result)
 
 
@@ -331,6 +361,8 @@ def main():
     app.add_handler(CommandHandler("undo", undo))
     app.add_handler(CommandHandler("balance", balance))
     app.add_handler(CommandHandler("setbalance", set_balance))
+    app.add_handler(CommandHandler("trustsender", trust_sender))
+    app.add_handler(CommandHandler("senders", list_senders))
     app.add_handler(CommandHandler("subscriptions", subscriptions))
     app.add_handler(CommandHandler("projection", projection))
     app.add_handler(CommandHandler("chart", chart))

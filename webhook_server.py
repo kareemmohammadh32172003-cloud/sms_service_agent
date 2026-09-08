@@ -14,6 +14,7 @@ Run locally for testing:
     python webhook_server.py
 """
 
+import os
 import threading
 from datetime import date
 from collections import defaultdict
@@ -21,6 +22,16 @@ from flask import Flask, request, jsonify
 import finance_core as core
 
 app = Flask(__name__)
+
+# Optional extra layer: if WEBHOOK_SHARED_SECRET is set in .env, every
+# request must include a matching X-Webhook-Secret header (configured
+# once in the SMS Forwarder app's HTTP Request action, alongside the
+# per-user token that's already in the URL). Not required - if the
+# env var is unset, this check is skipped so existing setups keep
+# working - but recommended, since the URL token alone could leak
+# (screenshots, logs, git history) while this second secret never
+# appears in the URL at all.
+WEBHOOK_SHARED_SECRET = os.getenv("WEBHOOK_SHARED_SECRET")
 
 # --------------------------------------------------------------
 # Simple in-memory daily rate limit per user, to stop a leaked or
@@ -48,6 +59,9 @@ def _under_rate_limit(user_id: str) -> bool:
 
 @app.route("/sms-webhook/<token>", methods=["POST"])
 def sms_webhook(token):
+    if WEBHOOK_SHARED_SECRET and request.headers.get("X-Webhook-Secret") != WEBHOOK_SHARED_SECRET:
+        return jsonify({"status": "error", "reason": "invalid or missing secret header"}), 401
+
     user = core.get_user_by_token(token)
     if not user:
         return jsonify({"status": "error", "reason": "invalid token"}), 404
@@ -58,15 +72,16 @@ def sms_webhook(token):
 
     data = request.get_json(force=True, silent=True) or {}
     raw_text = data.get("text") or data.get("message") or data.get("body") or ""
+    sender = data.get("sender") or data.get("from") or data.get("number") or ""
 
     if not raw_text:
         return jsonify({"status": "error", "reason": "no message text found in payload"}), 400
 
-    print(f"SMS for user {user['id']}: {raw_text[:100]}")
+    print(f"SMS for user {user['id']} from '{sender}': {raw_text[:100]}")
 
     try:
         result = core.process_incoming_sms(
-            raw_text, user_id=user["id"], telegram_chat_id=user.get("telegram_chat_id")
+            raw_text, user_id=user["id"], telegram_chat_id=user.get("telegram_chat_id"), sender=sender
         )
         print(f"Processed: {result}")
         return jsonify({"status": "ok", "result": result}), 200
