@@ -14,6 +14,8 @@ Run locally for testing:
     python webhook_server.py
 """
 
+import hmac
+import hashlib
 import os
 import threading
 from datetime import date
@@ -23,15 +25,23 @@ import finance_core as core
 
 app = Flask(__name__)
 
-# Optional extra layer: if WEBHOOK_SHARED_SECRET is set in .env, every
-# request must include a matching X-Webhook-Secret header (configured
-# once in the SMS Forwarder app's HTTP Request action, alongside the
-# per-user token that's already in the URL). Not required - if the
-# env var is unset, this check is skipped so existing setups keep
-# working - but recommended, since the URL token alone could leak
-# (screenshots, logs, git history) while this second secret never
-# appears in the URL at all.
-WEBHOOK_SHARED_SECRET = os.getenv("WEBHOOK_SHARED_SECRET")
+# =================================================================
+# Per-user HMAC secret: this is the real, unforgeable proof that a
+# request actually came from YOUR phone's SMS Forwarder app, not from
+# someone who found/guessed the webhook URL and is POSTing fake data
+# directly (e.g. via curl). The app signs the exact raw request body
+# with a secret you set once in its "Sign with HMAC-SHA-256" option,
+# and sends the signature in an X-Signature header. We recompute the
+# same signature here and compare - only someone who knows the secret
+# can produce a match, and the secret itself never travels in the URL
+# or the body, so it can't leak the way a URL token could.
+# =================================================================
+
+def _verify_hmac_signature(secret: str, raw_body: bytes, signature_header: str) -> bool:
+    if not signature_header:
+        return False
+    expected = hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature_header.lower())
 
 # --------------------------------------------------------------
 # Simple in-memory daily rate limit per user, to stop a leaked or
@@ -59,12 +69,17 @@ def _under_rate_limit(user_id: str) -> bool:
 
 @app.route("/sms-webhook/<token>", methods=["POST"])
 def sms_webhook(token):
-    if WEBHOOK_SHARED_SECRET and request.headers.get("X-Webhook-Secret") != WEBHOOK_SHARED_SECRET:
-        return jsonify({"status": "error", "reason": "invalid or missing secret header"}), 401
-
     user = core.get_user_by_token(token)
     if not user:
         return jsonify({"status": "error", "reason": "invalid token"}), 404
+
+    hmac_secret = user.get("hmac_secret")
+    if hmac_secret:
+        raw_body = request.get_data()
+        signature = request.headers.get("X-Signature", "")
+        if not _verify_hmac_signature(hmac_secret, raw_body, signature):
+            print(f"Rejected request for user {user['id']}: invalid or missing HMAC signature")
+            return jsonify({"status": "error", "reason": "invalid signature"}), 401
 
     if not _under_rate_limit(user["id"]):
         print(f"Rate limit exceeded for user {user['id']}")

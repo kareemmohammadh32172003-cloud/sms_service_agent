@@ -73,12 +73,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"أو ممكن كمان تلصق أي رسالة SMS هنا مباشرة وأنا هسجلها.\n\n"
         f"وكمان تقدر تقولي بصوتك أو بكلامك العادي على أي مصروف كاش (زي "
         f"'دفعت 50 جنيه تاكسي')، مش لازم يكون رسالة بنك رسمية.\n\n"
-        f"⚠️ مهم: عشان الرسايل تتسجل تلقائي، لازم دلوقتي تظبط تطبيق الـ SMS Forwarder "
-        f"يبعت اسم المرسل كمان مش بس النص - أضف حقل 'sender' في الـ JSON body، مثلاً:\n"
-        f'{{"text": "[sms_body]", "sender": "[sms_number]"}}\n\n'
+        f"⚠️ إعداد تطبيق SMS Forwarder (من F-Droid):\n"
+        f"1. Webhook URL: {webhook_url}\n"
+        f'2. Payload: {{"text": "%text%", "sender": "%from%"}}\n'
+        f"3. من Advanced parameters فعّل 'Sign with HMAC-SHA-256' وحط السيكرت "
+        f"اللي هتاخده من أمر /webhooksecret (استخدمه بعد ما تخلص التسجيل ده).\n\n"
         f"وبعد أول رسالة حقيقية توصلك تنبيه بيها، ابعت /trustsender <اسم المرسل> "
-        f"عشان تسجّله كمصدر موثوق (زي Fawry أو اسم بنكك)، والمرة الجاية هتتسجل لوحدها.\n\n"
-        f"الأوامر المتاحة: /today  /yesterday  /month  /lastmonth  /budgetstatus  /fix  /chart  /undo  /subscriptions  /projection  /balance  /setbalance  /trustsender  /senders"
+        f"عشان تسجّله كمصدر موثوق لو مكنش اتعرف تلقائي.\n\n"
+        f"الأوامر المتاحة: /today  /yesterday  /month  /lastmonth  /budgetstatus  /fix  /chart  /undo  /subscriptions  /projection  /balance  /setbalance  /trustsender  /senders  /webhooksecret"
     )
 
 
@@ -202,6 +204,21 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     account_name = " ".join(context.args[:-1])
     result = core.set_account_balance(user["id"], account_name, amount)
     await update.message.reply_text(result)
+
+
+async def webhook_secret(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = core.get_registered_user(update.effective_chat.id)
+    if not user:
+        await update.message.reply_text(NOT_REGISTERED_MSG)
+        return
+    secret = core.get_or_generate_hmac_secret(user["id"])
+    await update.message.reply_text(
+        "ده الـ secret الخاص بيك عشان تحطه في إعداد 'Sign with HMAC-SHA-256' "
+        "جوه تطبيق SMS Forwarder (Advanced parameters بتاعة الـ rule):\n\n"
+        f"`{secret}`\n\n"
+        "متشاركوش مع حد. بعد ما تحطه هناك، أي رسالة تجيلي من غير توقيع صحيح هترفض تلقائي.",
+        parse_mode="Markdown",
+    )
 
 
 async def trust_sender(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -361,6 +378,7 @@ def main():
     app.add_handler(CommandHandler("undo", undo))
     app.add_handler(CommandHandler("balance", balance))
     app.add_handler(CommandHandler("setbalance", set_balance))
+    app.add_handler(CommandHandler("webhooksecret", webhook_secret))
     app.add_handler(CommandHandler("trustsender", trust_sender))
     app.add_handler(CommandHandler("senders", list_senders))
     app.add_handler(CommandHandler("subscriptions", subscriptions))

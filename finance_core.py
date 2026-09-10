@@ -48,16 +48,19 @@ VALID_CATEGORIES = [
 
 def get_or_create_user(telegram_chat_id: int, display_name: str = "") -> dict:
     """Returns the user row for this Telegram chat, creating one
-    (with a fresh api_token) the first time they say /start."""
+    (with a fresh api_token and hmac_secret) the first time they say
+    /start."""
     existing = supabase.table("users").select("*") \
         .eq("telegram_chat_id", telegram_chat_id).execute().data
     if existing:
         return existing[0]
 
     token = secrets.token_urlsafe(24)
+    hmac_secret = secrets.token_hex(32)
     row = supabase.table("users").insert({
         "telegram_chat_id": telegram_chat_id,
         "api_token": token,
+        "hmac_secret": hmac_secret,
         "display_name": display_name,
     }).execute().data
     return row[0]
@@ -78,6 +81,19 @@ def get_user_by_token(token: str) -> dict | None:
     the token in their personal webhook URL."""
     rows = supabase.table("users").select("*").eq("api_token", token).execute().data
     return rows[0] if rows else None
+
+
+def get_or_generate_hmac_secret(user_id: str) -> str:
+    """Returns the user's HMAC secret, generating and saving one if
+    they registered before this feature existed (so hmac_secret is
+    still NULL for them)."""
+    row = supabase.table("users").select("hmac_secret").eq("id", user_id).execute().data
+    existing = row[0].get("hmac_secret") if row else None
+    if existing:
+        return existing
+    new_secret = secrets.token_hex(32)
+    supabase.table("users").update({"hmac_secret": new_secret}).eq("id", user_id).execute()
+    return new_secret
 
 
 def list_all_users() -> list[dict]:
