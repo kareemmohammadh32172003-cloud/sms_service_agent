@@ -1003,17 +1003,24 @@ WEBHOOK_SYSTEM_PROMPT = (
 
 def send_telegram_alert(chat_id: int, text: str) -> None:
     """Best-effort notification - never raises, so a failed alert
-    can't itself crash the caller."""
+    can't itself crash the caller. Logs WHY it didn't send, since a
+    silent no-op here is otherwise very hard to debug."""
     token = os.getenv("TELEGRAM_BOT_TOKEN")
-    if not token or not chat_id:
+    if not token:
+        print("send_telegram_alert: TELEGRAM_BOT_TOKEN not set in this service's env vars")
+        return
+    if not chat_id:
+        print("send_telegram_alert: no chat_id provided (user has no telegram_chat_id?)")
         return
     try:
-        requests.post(
+        resp = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
             json={"chat_id": chat_id, "text": text}, timeout=10,
         )
-    except Exception:
-        pass
+        if not resp.ok:
+            print(f"send_telegram_alert: Telegram API returned {resp.status_code}: {resp.text[:200]}")
+    except Exception as e:
+        print(f"send_telegram_alert: request failed: {e}")
 
 
 def _call_groq_with_retry(messages, max_tokens: int, max_retries: int = 3):
