@@ -23,7 +23,7 @@ import calendar
 import requests
 from datetime import datetime, date, timedelta
 from dotenv import load_dotenv
-from groq import Groq
+from groq import Groq, RateLimitError
 from supabase import create_client
 import matplotlib
 matplotlib.use("Agg")  # headless server, no display available
@@ -31,7 +31,17 @@ import matplotlib.pyplot as plt
 
 load_dotenv()
 
-groq_client = Groq()
+groq_client = Groq(
+    # max_retries=0: the SDK normally retries transient errors itself
+    # BEFORE raising, using its own backoff timing (which can be long
+    # on a 429). That was compounding with our own retry loop below and
+    # blocking the request thread long enough to blow past the web
+    # server's worker timeout and crash the whole process. We take full
+    # control of retry timing ourselves instead.
+    max_retries=0,
+    # timeout: hard cap per request so a hung call can't block forever.
+    timeout=15.0,
+)
 MODEL_NAME = "openai/gpt-oss-120b"
 
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
@@ -1059,21 +1069,32 @@ def send_telegram_alert(chat_id: int, text: str) -> None:
         print(f"send_telegram_alert: request failed: {e}")
 
 
-def _call_groq_with_retry(messages, max_tokens: int, max_retries: int = 3):
-    """Retries transient Groq API failures with exponential backoff
-    (1s, 2s, 4s) before giving up. Network hiccups and rate limits
-    are common with external APIs and shouldn't silently lose a
-    financial transaction on the first blip."""
+def _call_groq_with_retry(messages, max_tokens: int, max_retries: int = 2):
+    """Retries transient Groq API failures with a short, bounded
+    backoff - kept deliberately small (max ~1s total sleep, 15s per
+    request cap) so total handling time can never approach the web
+    server's worker timeout again (that combination is what caused a
+    full process crash before).
+
+    Rate limits (429) are NOT retried here at all - blocking this
+    thread to wait one out is exactly what caused the crash. Instead
+    we fail fast; the SMS Forwarder app on the phone already retries
+    failed webhook calls on its own schedule, which naturally spaces
+    requests out far better than blocking a server thread ever could.
+    """
     last_error = None
     for attempt in range(max_retries):
         try:
             return groq_client.chat.completions.create(
                 model=MODEL_NAME, messages=messages, tools=TOOLS_SCHEMA, max_tokens=max_tokens,
             )
+        except RateLimitError as e:
+            print(f"_call_groq_with_retry: rate limited (429), failing fast without retry: {e}")
+            raise
         except Exception as e:
             last_error = e
             if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
+                time.sleep(1)
     raise last_error
 
 
