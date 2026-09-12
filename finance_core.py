@@ -699,7 +699,15 @@ side of the transaction). Never confuse the two.
 8. "عزيزنا العميل، تم خصم 89.99 جنيه اشتراك شهري - نتفليكس"
    -> type=expense, amount=89.99, party="نتفليكس", account="" (unknown - not mentioned, leave blank), category=entertainment
 
-9. User types plainly (no SMS at all): "دفعت 50 جنيه تاكسي كاش"
+9. "تم شحن رصيد موبايلك ب 19 بنجاح وخصم 19 من محفظتك شاملة الضريبة؛ رصيد حسابك في فودافون كاش الحالي 188.89"
+   -> type=expense, amount=19, party="شحن رصيد", account="فودافون كاش", category=bills, balance_after=188.89
+   (mobile top-up confirmations often state TWO numbers - the top-up
+   amount and the amount actually deducted from the wallet, which can
+   differ if fees/tax apply. ALWAYS use the deducted/خصم amount as
+   'amount', never the top-up amount, even when they happen to match
+   like here. Look for the number right next to خصم specifically.)
+
+10. User types plainly (no SMS at all): "دفعت 50 جنيه تاكسي كاش"
    -> type=expense, amount=50, party="تاكسي", account="كاش", category=transport
    (any cash spending the user tells you about directly belongs to the "كاش" account)
 
