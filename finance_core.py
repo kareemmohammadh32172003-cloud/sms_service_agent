@@ -707,7 +707,17 @@ side of the transaction). Never confuse the two.
    'amount', never the top-up amount, even when they happen to match
    like here. Look for the number right next to خصم specifically.)
 
-10. User types plainly (no SMS at all): "دفعت 50 جنيه تاكسي كاش"
+10. "تم خصم المبلغ التالى من رصيدك لتسديد قيمة خدمة؛ 0.67 ج ضريبة دمغة وتم السداد بالكامل والرصيد الحالى"
+   -> NOT a transaction. This is a stamp-duty tax (ضريبة دمغة) withheld
+   from phone airtime that was already purchased in an earlier top-up
+   SMS - no new money left a bank account or e-wallet, so this is
+   carrier bookkeeping, not an expense to record again.
+
+11. "تم خصم 125 وحدة من كارت فكة رسوم هدية الكارت"
+   -> NOT a transaction. 125 is in وحدة (telecom bundle units -
+   minutes/data), not currency, regardless of the خصم verb.
+
+12. User types plainly (no SMS at all): "دفعت 50 جنيه تاكسي كاش"
    -> type=expense, amount=50, party="تاكسي", account="كاش", category=transport
    (any cash spending the user tells you about directly belongs to the "كاش" account)
 
@@ -999,6 +1009,24 @@ WEBHOOK_SYSTEM_PROMPT = (
     "'balance_after' whenever the SMS explicitly states the resulting balance "
     "(e.g. 'رصيدك الحالي X', 'رصيدك المتبقي X') - never calculate this yourself, "
     "only extract it if literally stated.\n\n"
+    "CRITICAL - telecom airtime/bundle activity is NOT a financial transaction: "
+    "mobile carriers (Vodafone, Orange, Etisalat, WE) send many automated SMS "
+    "about what happens to phone credit AFTER it was purchased - service taxes "
+    "withheld from airtime, bundle/minute/data consumption, promotional bonus "
+    "grants, gift-card unit fees. These never represent real money leaving a "
+    "bank account or e-wallet, even when phrased with a debit verb like خصم. "
+    "Only call add_transaction if BOTH of these hold:\n"
+    "  1. The amount is real currency (جنيه/ج/EGP/دولار) - NEVER telecom bundle "
+    "units (وحدة, دقيقة, ميجا, GB, رسالة). A message stating '125 وحدة' or "
+    "'950 دقيقة' is not a transaction no matter what verb precedes it.\n"
+    "  2. The money is leaving/entering an actual bank account or e-wallet "
+    "balance (بنك مصر, فودافون كاش, فوري, انستاباي, etc) - NOT the phone "
+    "line's own airtime/credit/bundle balance. Watch for phrases like 'من "
+    "رصيدك ... لتسديد قيمة خدمة', 'ضريبة دمغة', 'كارت فكة', 'رسوم هدية الكارت' "
+    "- these describe the carrier's internal bookkeeping on credit that was "
+    "already purchased and recorded once at top-up time, not a new expense.\n"
+    "If either test fails, treat it exactly like a promotional SMS: reply "
+    "'not a transaction' and call no tool.\n\n"
     "SCAM AWARENESS: genuine bank/wallet transaction SMS simply states a fact "
     "(amount, direction, sometimes balance) - it never asks the user to call a "
     "number, click a link, share an OTP, or 'confirm' anything. If the message "
